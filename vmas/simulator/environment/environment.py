@@ -215,6 +215,7 @@ class Environment(TorchVectorizedObject):
             >>> for _ in range(10):
             ...     obs, rews, dones, info = env.step(env.get_random_actions())
         """
+        # print("env total actions:{}".format(actions))
         if isinstance(actions, Dict):
             actions_dict = actions
             actions = []
@@ -251,6 +252,7 @@ class Environment(TorchVectorizedObject):
         for i, agent in enumerate(self.agents):
             self._set_action(actions[i], agent)
         # Scenarios can define a custom action processor. This step takes care also of scripted agents automatically
+        self.scenario.env_process_action_collectively()
         for agent in self.world.agents:
             self.scenario.env_process_action(agent)
 
@@ -458,7 +460,8 @@ class Environment(TorchVectorizedObject):
             device=self.device,
             dtype=torch.float32,
         )
-
+        # print(" env actions:{}".format(action))
+        # print("env action shape:{}".format(action.shape))
         assert action.shape[1] == self.get_agent_action_size(agent), (
             f"Agent {agent.name} has wrong action size, got {action.shape[1]}, "
             f"expected {self.get_agent_action_size(agent)}"
@@ -697,21 +700,21 @@ class Environment(TorchVectorizedObject):
                 torch.tensor(zoom, device=self.device),
             )
             cam_range *= torch.max(viewer_size)
-            # self.viewer.set_bounds(
-            #     -cam_range[X],
-            #     cam_range[X],
-            #     -cam_range[Y],
-            #     cam_range[Y],
-            # )
+            self.viewer.set_bounds(
+                -cam_range[X],
+                cam_range[X],
+                -cam_range[Y],
+                cam_range[Y],
+            )
         else:
             # update bounds to center around agent
             pos = self.agents[agent_index_focus].state.pos[env_index]
-            self.viewer.set_bounds(
-                pos[X] - cam_range[X],
-                pos[X] + cam_range[X],
-                pos[Y] - cam_range[Y],
-                pos[Y] + cam_range[Y],
-            )
+            # self.viewer.set_bounds(
+            #     pos[X] - cam_range[X],
+            #     pos[X] + cam_range[X],
+            #     pos[Y] - cam_range[Y],
+            #     pos[Y] + cam_range[Y],
+            # )
 
         # Render
         self._set_agent_comm_messages(env_index)

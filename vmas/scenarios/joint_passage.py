@@ -665,6 +665,7 @@ class Scenario(BaseScenario):
             dtype=torch.int,
             device=self.world.device,
         )
+        
         for passage in self.collide_passages:
             is_pass = is_passage(i)
             while is_pass.any():
