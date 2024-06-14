@@ -218,7 +218,9 @@ class Scenario(BaseScenario):
 
     def reward(self, agent: Agent):
         is_first = agent == self.world.agents[0]
-
+        current_agent_index = self.world.agents.index(agent)
+        
+        print("reward agent index {}".format(current_agent_index))
         if self.shared_reward:
             if is_first:
                 self.rew = torch.zeros(
@@ -245,14 +247,14 @@ class Scenario(BaseScenario):
             agent_shaping = dist_to_goal * self.shaping_factor
             self.rew += agent.global_shaping - agent_shaping
             agent.global_shaping = agent_shaping
-
-        if agent.collide:
-            for a in self.world.agents:
-                if a != agent:
-                    self.rew[self.world.is_overlapping(a, agent)] -= 10
-            for landmark in self.world.landmarks[self.n_agents :]:
-                if landmark.collide:
-                    self.rew[self.world.is_overlapping(agent, landmark)] -= 10
+        print("self.rew:{}".format(self.rew))
+        # if agent.collide:
+        #     for a in self.world.agents:
+        #         if a != agent:
+        #             self.rew[self.world.is_overlapping(a, agent)] -= 10
+        #     for landmark in self.world.landmarks[self.n_agents :]:
+        #         if landmark.collide:
+        #             self.rew[self.world.is_overlapping(agent, landmark)] -= 10
 
         return self.rew
 
@@ -326,5 +328,5 @@ class Scenario(BaseScenario):
 
 if __name__ == "__main__":
     render_interactively(
-        __file__, control_two_agents=True, n_passages=3, shared_reward=False
+        __file__, control_two_agents=True, n_passages=3, shared_reward=True
     )

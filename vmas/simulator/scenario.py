@@ -48,7 +48,7 @@ class BaseScenario(ABC):
         """The size of the rendering viewer window. This can be changed in the :class:`~make_world` function. """
         self.viewer_zoom = VIEWER_MIN_ZOOM
         """The zoom of the rendering camera. This can be changed in the :class:`~make_world` function. """
-        self.plot_grid = True
+        self.plot_grid = False
         """Whether to plot a grid in the scenario rendering background. This can be changed in the :class:`~make_world` function. """
         self.grid_spacing = 0.1
         """If :class:`~plot_grid`, the distance between lines in the background grid. This can be changed in the :class:`~make_world` function. """
@@ -89,6 +89,9 @@ class BaseScenario(ABC):
         # Customizable action processor
         self.process_action(agent)
         agent.dynamics.check_and_process_action()
+
+    def env_process_action_collectively(self):
+        pass
 
     @abstractmethod
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:

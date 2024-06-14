@@ -14,6 +14,7 @@ from torch import Tensor
 
 from vmas.simulator.dynamics.common import Dynamics
 from vmas.simulator.dynamics.holonomic import Holonomic
+from vmas.simulator.dynamics.holonomic_with_rot import HolonomicWithRotation
 from vmas.simulator.joints import Joint
 from vmas.simulator.physics import (
     _get_closest_box_box,
@@ -846,7 +847,7 @@ class Agent(Entity):
         obs_range: float = None,
         obs_noise: float = None,
         u_noise: Union[float, Sequence[float]] = 0.0,
-        u_range: Union[float, Sequence[float]] = 1.0,
+        u_range: Union[float, Sequence[float]] = 2.0,
         u_multiplier: Union[float, Sequence[float]] = 1.0,
         action_script: Callable[[Agent, World], None] = None,
         sensors: List[Sensor] = None,
@@ -1048,13 +1049,14 @@ class Agent(Entity):
         for geom in geoms:
             geom.set_color(*self.color, alpha=self._alpha)
         if self._sensors is not None:
-            for sensor in self._sensors:
-                geoms += sensor.render(env_index=env_index)
+            pass
+            # for sensor in self._sensors:
+            #     geoms += sensor.render(env_index=env_index)
         if self._render_action and self.state.force is not None:
             velocity = rendering.Line(
                 self.state.pos[env_index],
                 self.state.pos[env_index]
-                + self.state.force[env_index] * 10 * self.shape.circumscribed_radius(),
+                + self.state.force[env_index] * 2 * self.shape.circumscribed_radius(),
                 width=2,
             )
             velocity.set_color(*self.color)
@@ -1434,7 +1436,7 @@ class World(TorchVectorizedObject):
             dist = self.get_distance_from_point(box, sphere.state.pos, env_index)
             return_value = dist - sphere.shape.radius
             is_overlapping = self.is_overlapping(entity_a, entity_b)
-            return_value[is_overlapping] = -1
+            return_value[is_overlapping] = -return_value[is_overlapping]
         elif (
             isinstance(entity_a.shape, Line)
             and isinstance(entity_b.shape, Sphere)

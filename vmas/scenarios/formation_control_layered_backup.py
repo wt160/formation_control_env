@@ -234,7 +234,6 @@ class Scenario(BaseScenario):
 
         self.pos_rew = torch.zeros(batch_dim, device=device)
         self.angle_rew = torch.zeros(batch_dim, device=device)
-        self.formation_maintain_rew = torch.zeros(batch_dim, device=device) 
         self.final_rew = self.pos_rew.clone()
         self.keep_track_time = torch.zeros(batch_dim, device=device)
         self.update_formation_assignment_time = torch.zeros(batch_dim, device=device)
@@ -404,8 +403,8 @@ class Scenario(BaseScenario):
             self.world,
             env_index,
             self.min_distance_between_entities,
-            (-self.world_semidim+1, -3),
-            (-self.world_semidim+4, self.world_semidim-4),
+            (-self.world_semidim, -3),
+            (-self.world_semidim+2, self.world_semidim-2),
         )
         ScenarioUtils.spawn_entities_randomly(
             self.world.landmarks,
@@ -578,7 +577,7 @@ class Scenario(BaseScenario):
             elif formation_movement == "horizental":
                 ###move from left to right, test formation's ability to cross through tunnel
                 t = self.t / 30
-                if self.t < 1000:
+                if self.t < 10000:
                     self.formation_center.set_pos(
                         torch.tensor(
                             [
@@ -693,9 +692,8 @@ class Scenario(BaseScenario):
             self.pos_rew[:] = 0
             self.final_rew[:] = 0
             self.angle_rew[:] = 0
-            self.formation_maintain_rew[:] = 0
             # print("---------------------before----------------------")
-            self.formation_maintain_rew = self.agent_reward_graph_formation_maintained()
+            # self.agent_reward_graph_formation_maintained()
             for a in self.world.agents:
                 self.pos_rew += self.agent_reward(a)
                 self.angle_rew += self.agent_angle_reward(a) 
@@ -732,8 +730,7 @@ class Scenario(BaseScenario):
 
         pos_reward = self.pos_rew if self.shared_rew else agent.pos_rew
         angle_reward = self.angle_rew if self.shared_rew else agent.angle_rew
-        # return 5*pos_reward + self.final_rew + agent.agent_collision_rew + angle_reward
-        return self.formation_maintain_rew + agent.agent_collision_rew
+        return 5*pos_reward + self.final_rew + agent.agent_collision_rew + angle_reward
     
     
 
@@ -765,11 +762,6 @@ class Scenario(BaseScenario):
             # print("target_positions shape:{}".format(target_positions.shape))
             # print("target_center shape:{}".format(target_center.shape))
             # Center the positions
-
-
-
-            #begin for matching error reward
-
             centered_formation_positions = formation_goals_positions - formation_center
             centered_target_positions = target_positions - target_center
             # print("centered_target-positions shape:{}".format(centered_target_positions.shape))
@@ -802,17 +794,13 @@ class Scenario(BaseScenario):
             # Calculate the matching error
             matching_error = torch.norm(centered_target_positions[row_ind] - rotated_formation_positions[col_ind], dim=1).mean()
 
-            #end for matching_error reward
 
-
-            
             center_matching_error = torch.norm(target_center - formation_center).item()
             # print("matching_error:{}".format(matching_error))
             # print("center error:{}".format(center_matching_error))
             # Calculate the reward
             max_reward = 1.0
             reward = max_reward - (matching_error.item() + center_matching_error)
-            # reward = max_reward - center_matching_error
             graph_connect_rew[batch_idx] = reward
             # Calculate the reward
         # print("formation_maintain reward:{}".format(graph_connect_rew))
@@ -931,21 +919,21 @@ class Scenario(BaseScenario):
     def observation(self, agent: Agent):
         goal_poses = []
         goal_rot_poses = []
-        observations = [agent.state.pos, agent.state.vel]
+        observations = [agent.state.pos, agent.state.vel, agent.state.rot]
 
     # Add positions and velocities of all agents (including the current agent)
         # for a in self.world.agents:
         #     observations.append(a.state.pos)
         #     observations.append(a.state.vel)
 
-        if self.observe_all_goals:
-            for g in self.formation_goals_landmark.values():
-                goal_poses.append(g.state.pos.clone())
-        else:
-            goal_poses.append(agent.state.pos - agent.goal.state.pos)
-        # goal_rot_poses.append(agent.state.rot - agent.goal.state.rot)
+        # if self.observe_all_goals:
+        #     for g in self.formation_goals_landmark.values():
+        #         goal_poses.append(agent.state.pos - g.state.pos.clone())
+        # else:
+        goal_poses.append(agent.state.pos - agent.goal.state.pos)
+        goal_rot_poses.append(agent.state.rot - agent.goal.state.rot)
         observation_tensor = torch.cat(
-            observations + goal_poses  +  (
+            observations + goal_poses + goal_rot_poses +  (
                 [agent.sensors[0]._max_range - agent.sensors[0].measure()]
                 if self.collisions
                 else []
