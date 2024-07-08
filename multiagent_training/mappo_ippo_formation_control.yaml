@@ -1,12 +1,89 @@
 seed: 0
 
-
+imitation:
+  num_epochs: 60
+  iterations_per_batch: 10
+  patience: 10
+  min_delta: 0.01
 
 env:
-  max_steps: 300
+  max_steps: 200
   scenario_name: "formation_control"
   scenario:
-    n_agents: 5
+    n_agents: 4
+    init_position_noise_level: 0
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_0:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_1:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0.1
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_2:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0.15
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_3:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0.2
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_4:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0.25
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_5:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0.3
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_6:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 4
+    init_position_noise_level: 0.35
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+env_7:
+  max_steps: 200
+  scenario_name: "formation_control"
+  scenario:
+    n_agents: 2
+    init_position_noise_level: 0.4
   device: ??? # These values will be populated dynamically
   vmas_envs: ???
 
@@ -16,8 +93,8 @@ model:
 
 collector:
   frames_per_batch: 18000 # Frames sampled each sampling iteration
-  n_iters: 200 # Number of sampling/training iterations
-  total_frames: ???
+  n_iters: 2000 # Number of sampling/training iterations
+  total_frames: 36000
 
 buffer:
   memory_size: ???

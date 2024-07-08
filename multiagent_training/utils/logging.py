@@ -96,8 +96,28 @@ def log_training(
     else:
         for key, value in to_log.items():
             logger.log_scalar(key.replace("/", "_"), value, step=step)
-
     return to_log
+
+def save_video_from_frames(frames, env_test, filename="output_video.mp4", fps=30):
+    vid = torch.tensor(
+        np.transpose(frames[:], (0, 3, 1, 2)),
+        dtype=torch.uint8,
+    ).unsqueeze(0)
+    # Convert from PyTorch tensor to numpy array
+    # frames_tensor shape expected: [1, num_frames, channels, height, width]
+    # Adjust dimensions to [num_frames, height, width, channels]
+    video_array = vid.squeeze(0).permute(0, 2, 3, 1).numpy()
+
+    # Create a video writer object using imageio with the desired output filename and fps
+    writer = imageio.get_writer(filename, fps=1 / env_test.world.dt, codec='libx264', quality=8)
+
+    # Write frames to video file
+    for frame in video_array:
+        writer.append_data(frame)
+
+    # Close the writer to finalize the video file
+    writer.close()
+    print(f"Video saved as {filename}")
 
 def save_video(rollouts, env_test, filename="output_video.mp4", fps=30):
     vid = torch.tensor(
@@ -148,6 +168,9 @@ def log_evaluation(
         / len(rollouts),
         "eval/evaluation_time": evaluation_time,
     }
+    step_onto_next_level = False
+    if sum(rewards) / len(rollouts) > 180:
+        step_onto_next_level = True
     max_reward_idx = rewards.index(max(rewards))
     print("max_reward-idx:{}".format(max_reward_idx))
     print("env_test frames shape:{}".format(len(env_test.frames)))
@@ -170,3 +193,5 @@ def log_evaluation(
         for key, value in to_log.items():
             logger.log_scalar(key.replace("/", "_"), value, step=step)
         logger.log_video("eval_video", vid, step=step)
+
+    return step_onto_next_level

@@ -2,6 +2,7 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import os
 import time
 
 import hydra
@@ -31,9 +32,16 @@ def rendering_callback(env, td):
 def save_checkpoint(model, filename):
     torch.save(model.state_dict(), filename)
 
+
+
+
 @hydra.main(version_base="1.1", config_path=".", config_name="mappo_ippo_formation_control")
 def train(cfg: "DictConfig"):  # noqa: F821
     # Device
+    log_file_path = "logfile.txt"
+
+# Open the file in append mode (creates it if it doesn't exist)
+
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
     cfg.env.device = cfg.train.device
 
@@ -45,7 +53,6 @@ def train(cfg: "DictConfig"):  # noqa: F821
     cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
     cfg.buffer.memory_size = cfg.collector.frames_per_batch
 
-    # Create env and env_test
     env = VmasEnv(
         scenario=cfg.env.scenario_name,
         num_envs=cfg.env.vmas_envs,
@@ -62,8 +69,25 @@ def train(cfg: "DictConfig"):  # noqa: F821
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
     )
-    print("env action keys:{}".format(env.action_keys))
-    env_test = VmasEnv(
+
+    # Create env and env_test
+    env_0 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_0.scenario,
+    )
+    print("env:{}".format(env_0))
+
+    env_0 = TransformedEnv(
+        env_0,
+        RewardSum(in_keys=[env_0.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_0 = VmasEnv(
         scenario=cfg.env.scenario_name,
         num_envs=cfg.eval.evaluation_episodes,
         continuous_actions=True,
@@ -71,15 +95,240 @@ def train(cfg: "DictConfig"):  # noqa: F821
         device=cfg.env.device,
         seed=cfg.seed,
         # Scenario kwargs
-        **cfg.env.scenario,
+        **cfg.env_0.scenario,
     )
-    env_test._init_rendering()
-    env_test.viewer.set_bounds(
+    env_test_0._init_rendering()
+    env_test_0.viewer.set_bounds(
                 torch.tensor(-5),
                 torch.tensor(5),
                 torch.tensor(-5),
                 torch.tensor(5),
             )
+    env_1 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_1.scenario,
+    )
+    print("env:{}".format(env_1))
+
+    env_1 = TransformedEnv(
+        env_1,
+        RewardSum(in_keys=[env_1.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_1 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_1.scenario,
+    )
+    env_test_1._init_rendering()
+    env_test_1.viewer.set_bounds(
+                torch.tensor(-5),
+                torch.tensor(5),
+                torch.tensor(-5),
+                torch.tensor(5),
+            )
+    env_2 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_2.scenario,
+    )
+
+    env_2 = TransformedEnv(
+        env_2,
+        RewardSum(in_keys=[env_2.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_2 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_2.scenario,
+    )
+    env_test_2._init_rendering()
+    env_test_2.viewer.set_bounds(
+                torch.tensor(-5),
+                torch.tensor(5),
+                torch.tensor(-5),
+                torch.tensor(5),
+            )
+    env_3 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_3.scenario,
+    )
+    print("env:{}".format(env_3))
+
+    env_3 = TransformedEnv(
+        env_3,
+        RewardSum(in_keys=[env_3.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_3 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_3.scenario,
+    )
+    env_test_3._init_rendering()
+    env_test_3.viewer.set_bounds(
+                torch.tensor(-5),
+                torch.tensor(5),
+                torch.tensor(-5),
+                torch.tensor(5),
+            )
+
+    env_4 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_4.scenario,
+    )
+    print("env:{}".format(env_4))
+
+    env_4 = TransformedEnv(
+        env_4,
+        RewardSum(in_keys=[env_4.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_4 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_4.scenario,
+    )
+    env_test_4._init_rendering()
+    env_test_4.viewer.set_bounds(
+                torch.tensor(-5),
+                torch.tensor(5),
+                torch.tensor(-5),
+                torch.tensor(5),
+            )
+
+    env_5 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_5.scenario,
+    )
+    print("env:{}".format(env_5))
+
+    env_5 = TransformedEnv(
+        env_5,
+        RewardSum(in_keys=[env_5.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_5 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_5.scenario,
+    )
+    env_test_5._init_rendering()
+    env_test_5.viewer.set_bounds(
+                torch.tensor(-5),
+                torch.tensor(5),
+                torch.tensor(-5),
+                torch.tensor(5),
+            )
+
+    env_6 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_6.scenario,
+    )
+    print("env:{}".format(env_6))
+
+    env_6 = TransformedEnv(
+        env_6,
+        RewardSum(in_keys=[env_6.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+    env_test_6 = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env_6.scenario,
+    )
+    env_test_6._init_rendering()
+    env_test_6.viewer.set_bounds(
+                torch.tensor(-5),
+                torch.tensor(5),
+                torch.tensor(-5),
+                torch.tensor(5),
+            )
+
+    
+
+    env_list = []
+    env_list.append(env_0)
+    env_list.append(env_1)
+    env_list.append(env_2)
+    env_list.append(env_3)
+    env_list.append(env_4)
+    env_list.append(env_5)
+    env_list.append(env_6)
+
+    env_test_list = []
+    env_test_list.append(env_test_0)
+    env_test_list.append(env_test_1)
+    env_test_list.append(env_test_2)
+    env_test_list.append(env_test_3)
+    env_test_list.append(env_test_4)
+    env_test_list.append(env_test_5)
+    env_test_list.append(env_test_6)
+
+
+
+
+
     # Policy
     hidden_dim = 64
     output_dim = 6  # Local target position (x, y)
@@ -94,7 +343,7 @@ def train(cfg: "DictConfig"):  # noqa: F821
     gnn_policy_module = TensorDictModule(
         gnn_actor_net,
         in_keys=[("agents", "observation")],
-        out_keys=[("agents", "loc"), ("agents", "scale") ],
+        out_keys=[("agents", "loc"), ("agents", "scale") ], 
         # out_keys=[env.action_key],
     )
     print(env.unbatched_action_spec[("agents", "action")].space.low / 2)
@@ -165,8 +414,13 @@ def train(cfg: "DictConfig"):  # noqa: F821
         in_keys=[("agents", "observation")],
     )
 
-    collector = SyncDataCollector(
-        env,
+    # previous_policy_path = "../test_policy_0.1.pth"
+    # if os.path.exists(previous_policy_path):
+    #     print("Loading IL policy from checkpoint...")
+    #     gnn_policy.load_state_dict(torch.load(previous_policy_path))
+
+    collector_0 = SyncDataCollector(
+        env_0,
         gnn_policy,
         device=cfg.env.device,
         storing_device=cfg.train.device,
@@ -175,19 +429,131 @@ def train(cfg: "DictConfig"):  # noqa: F821
         postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
     )
 
-    replay_buffer = TensorDictReplayBuffer(
+    collector_1 = SyncDataCollector(
+        env_1,
+        policy,
+        device=cfg.env.device,
+        storing_device=cfg.train.device,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=cfg.collector.total_frames,
+        postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
+    )
+
+    collector_2 = SyncDataCollector(
+        env_2,
+        gnn_policy,
+        device=cfg.env.device,
+        storing_device=cfg.train.device,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=cfg.collector.total_frames,
+        postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
+    )
+
+    collector_3 = SyncDataCollector(
+        env_3,
+        gnn_policy,
+        device=cfg.env.device,
+        storing_device=cfg.train.device,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=cfg.collector.total_frames,
+        postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
+    )
+
+    collector_4 = SyncDataCollector(
+        env_4,
+        gnn_policy,
+        device=cfg.env.device,
+        storing_device=cfg.train.device,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=cfg.collector.total_frames,
+        postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
+    )
+
+    collector_5 = SyncDataCollector(
+        env_5,
+        gnn_policy,
+        device=cfg.env.device,
+        storing_device=cfg.train.device,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=cfg.collector.total_frames,
+        postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
+    )
+
+    collector_6 = SyncDataCollector(
+        env_6,
+        gnn_policy,
+        device=cfg.env.device,
+        storing_device=cfg.train.device,
+        frames_per_batch=cfg.collector.frames_per_batch,
+        total_frames=cfg.collector.total_frames,
+        postproc=DoneTransform(reward_key=env.reward_key, done_keys=env.done_keys),
+    )
+    collector_list = []
+    collector_list.append(collector_0)
+    collector_list.append(collector_1)
+    collector_list.append(collector_2)
+    collector_list.append(collector_3)
+    collector_list.append(collector_4)
+    collector_list.append(collector_5)
+    collector_list.append(collector_6)
+
+    replay_buffer_0 = TensorDictReplayBuffer(
         storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
         sampler=SamplerWithoutReplacement(),
         batch_size=cfg.train.minibatch_size,
     )
 
+    replay_buffer_1 = TensorDictReplayBuffer(
+        storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
+        sampler=SamplerWithoutReplacement(),
+        batch_size=cfg.train.minibatch_size,
+    )
+
+    replay_buffer_2 = TensorDictReplayBuffer(
+        storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
+        sampler=SamplerWithoutReplacement(),
+        batch_size=cfg.train.minibatch_size,
+    )
+
+    replay_buffer_3 = TensorDictReplayBuffer(
+        storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
+        sampler=SamplerWithoutReplacement(),
+        batch_size=cfg.train.minibatch_size,
+    )
+
+    replay_buffer_4 = TensorDictReplayBuffer(
+        storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
+        sampler=SamplerWithoutReplacement(),
+        batch_size=cfg.train.minibatch_size,
+    )
+
+    replay_buffer_5 = TensorDictReplayBuffer(
+        storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
+        sampler=SamplerWithoutReplacement(),
+        batch_size=cfg.train.minibatch_size,
+    )
+
+    replay_buffer_6 = TensorDictReplayBuffer(
+        storage=LazyTensorStorage(cfg.buffer.memory_size, device=cfg.train.device),
+        sampler=SamplerWithoutReplacement(),
+        batch_size=cfg.train.minibatch_size,
+    )
+    replay_buffer_list = []
+    replay_buffer_list.append(replay_buffer_0)
+    replay_buffer_list.append(replay_buffer_1)
+    replay_buffer_list.append(replay_buffer_2)
+    replay_buffer_list.append(replay_buffer_3)
+    replay_buffer_list.append(replay_buffer_4)
+    replay_buffer_list.append(replay_buffer_5)
+    replay_buffer_list.append(replay_buffer_6)
+
     # Loss
     loss_module = ClipPPOLoss(
-        actor_network=gnn_policy,
+        actor_network=policy,
         critic_network=value_module,
         clip_epsilon=cfg.loss.clip_epsilon,
         entropy_coef=cfg.loss.entropy_eps,
-        normalize_advantage=False,
+        normalize_advantage=True,
     )
     loss_module.set_keys(
         reward=env.reward_key,
@@ -212,95 +578,111 @@ def train(cfg: "DictConfig"):  # noqa: F821
     total_time = 0
     total_frames = 0
     sampling_start = time.time()
-    for i, tensordict_data in enumerate(collector):
-        torchrl_logger.info(f"\nIteration {i}")
+    training_converge = False
+    current_replay_buffer = replay_buffer_0
+    current_env_test_index = 0
+    current_env_index = 1
+    step_onto_next_level_count = 0
+    while training_converge == False:
+        step_onto_next_level_count = 0
+        with open(log_file_path, "a") as log_file:
+            log_file.write("switch to new collector_list\n")
+        for i, tensordict_data in enumerate(collector_list[current_env_index]):
+            torchrl_logger.info(f"\nIteration {i}")
 
-        sampling_time = time.time() - sampling_start
+            sampling_time = time.time() - sampling_start
 
-        with torch.no_grad():
-            loss_module.value_estimator(
-                tensordict_data,
-                params=loss_module.critic_network_params,
-                target_params=loss_module.target_critic_network_params,
-            )
-        # print("tensordict_data:{}".format(tensordict_data))
-        current_frames = tensordict_data.numel()
-        total_frames += current_frames
-        data_view = tensordict_data.reshape(-1)
-        replay_buffer.extend(data_view)
+            with torch.no_grad():
+                loss_module.value_estimator(
+                    tensordict_data,
+                    params=loss_module.critic_network_params,
+                    target_params=loss_module.target_critic_network_params,
+                )
+            # print("tensordict_data:{}".format(tensordict_data))
+            current_frames = tensordict_data.numel()
+            total_frames += current_frames
+            data_view = tensordict_data.reshape(-1)
+            replay_buffer_list[current_env_index].extend(data_view)
+            print("data_view:{}".format(data_view))
+            training_tds = []
+            training_start = time.time()
+            for _ in range(cfg.train.num_epochs):
+                for _ in range(cfg.collector.frames_per_batch // cfg.train.minibatch_size):
+                    subdata = replay_buffer_list[current_env_index].sample()
+                    print("subdata:{}".format(subdata.shape))
+                    loss_vals = loss_module(subdata)
+                    training_tds.append(loss_vals.detach())
 
-        training_tds = []
-        training_start = time.time()
-        for _ in range(cfg.train.num_epochs):
-            for _ in range(cfg.collector.frames_per_batch // cfg.train.minibatch_size):
-                subdata = replay_buffer.sample()
-                print("subdata:{}".format(subdata.shape))
-                loss_vals = loss_module(subdata)
-                training_tds.append(loss_vals.detach())
+                    loss_value = (
+                        loss_vals["loss_objective"]
+                        + loss_vals["loss_critic"]
+                        + loss_vals["loss_entropy"]
+                    )
 
-                loss_value = (
-                    loss_vals["loss_objective"]
-                    + loss_vals["loss_critic"]
-                    + loss_vals["loss_entropy"]
+                    loss_value.backward()
+
+                    total_norm = torch.nn.utils.clip_grad_norm_(
+                        loss_module.parameters(), cfg.train.max_grad_norm
+                    )
+                    training_tds[-1].set("grad_norm", total_norm.mean())
+
+                    optim.step()
+                    optim.zero_grad()
+
+            collector_list[current_env_index].update_policy_weights_()
+
+            training_time = time.time() - training_start
+
+            iteration_time = sampling_time + training_time
+            total_time += iteration_time
+            training_tds = torch.stack(training_tds)
+
+            # More logs
+            if cfg.logger.backend:
+                log_training(
+                    logger,
+                    training_tds,
+                    tensordict_data,
+                    sampling_time,
+                    training_time,
+                    total_time,
+                    i,
+                    current_frames,
+                    total_frames,
+                    step=i,
                 )
 
-                loss_value.backward()
-
-                total_norm = torch.nn.utils.clip_grad_norm_(
-                    loss_module.parameters(), cfg.train.max_grad_norm
-                )
-                training_tds[-1].set("grad_norm", total_norm.mean())
-
-                optim.step()
-                optim.zero_grad()
-
-        collector.update_policy_weights_()
-
-        training_time = time.time() - training_start
-
-        iteration_time = sampling_time + training_time
-        total_time += iteration_time
-        training_tds = torch.stack(training_tds)
-
-        # More logs
-        if cfg.logger.backend:
-            log_training(
-                logger,
-                training_tds,
-                tensordict_data,
-                sampling_time,
-                training_time,
-                total_time,
-                i,
-                current_frames,
-                total_frames,
-                step=i,
-            )
-
-        if (
-            cfg.eval.evaluation_episodes > 0
-            and i % cfg.eval.evaluation_interval == 0
-            and cfg.logger.backend
-        ):
-            evaluation_start = time.time()
-            with torch.no_grad(), set_exploration_type(ExplorationType.MODE):
-                env_test.frames = []
-                rollouts = env_test.rollout(
-                    max_steps=cfg.env.max_steps,
-                    policy=gnn_policy,
-                    callback=rendering_callback,
-                    auto_cast_to_device=True,
-                    break_when_any_done=False,
-                    # We are running vectorized evaluation we do not want it to stop when just one env is done
-                )
-                print("rollouts:{}".format(rollouts))
-                evaluation_time = time.time() - evaluation_start
-                save_checkpoint(gnn_policy, "test_policy_{}.pth".format(i))
-                log_evaluation(logger, rollouts, env_test, evaluation_time, step=i)
-
-        if cfg.logger.backend == "wandb":
-            logger.experiment.log({}, commit=True)
-        sampling_start = time.time()
+            if (
+                cfg.eval.evaluation_episodes > 0
+                and i % cfg.eval.evaluation_interval == 0
+                and i != 0
+                and cfg.logger.backend
+            ):
+                evaluation_start = time.time()
+                with torch.no_grad(), set_exploration_type(ExplorationType.MODE):
+                    env_test_list[current_env_index].frames = []
+                    rollouts = env_test_list[current_env_index].rollout(
+                        max_steps=cfg.env.max_steps,
+                        policy=policy,
+                        callback=rendering_callback,
+                        auto_cast_to_device=True,
+                        break_when_any_done=False,
+                        # We are running vectorized evaluation we do not want it to stop when just one env is done
+                    )
+                    print("rollouts:{}".format(rollouts))
+                    evaluation_time = time.time() - evaluation_start
+                    save_checkpoint(policy, "test_policy_{}.pth".format(i))
+                    step_onto_next_level = log_evaluation(logger, rollouts, env_test_list[current_env_index], evaluation_time, step=i)
+                    if step_onto_next_level:
+                        step_onto_next_level_count += 1
+                        if step_onto_next_level_count > 3:
+                            current_env_index += 1
+                            with open(log_file_path, "a") as log_file:
+                                log_file.write("step onto next level\n")
+                            break
+            if cfg.logger.backend == "wandb":
+                logger.experiment.log({}, commit=True)
+            sampling_start = time.time()
 
 
 import torch
@@ -373,7 +755,7 @@ class GINPolicyNetwork(torch.nn.Module):
 
         # Define GINConv layers
         nn1 = torch.nn.Sequential(
-            torch.nn.Linear(processed_lidar_dim + 14, hidden_dim),  # Adjust input_dim to include preprocessed LiDAR features
+            torch.nn.Linear(processed_lidar_dim + 18, hidden_dim),  # Adjust input_dim to include preprocessed LiDAR features
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim)
         )
@@ -399,7 +781,7 @@ class GINPolicyNetwork(torch.nn.Module):
 
         batch_size, num_agents, feature_length = data.shape
         # Separate original features and LiDAR data
-        original_features, lidar_data = data[:, :, :14], data[:, :, 14:]
+        original_features, lidar_data = data[:, :, :18], data[:, :, 18:]
 
         # Preprocess LiDAR data
         lidar_features = self.lidar_fc(lidar_data)
@@ -457,7 +839,7 @@ def evaluation(cfg: "DictConfig"):  # noqa: F821
         device=cfg.env.device,
         seed=cfg.seed,
         # Scenario kwargs
-        **cfg.env.scenario,
+        **cfg.env_1.scenario,
     )
     env_test._init_rendering()
     env_test.viewer.set_bounds(
