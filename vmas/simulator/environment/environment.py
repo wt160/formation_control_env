@@ -449,6 +449,7 @@ class Environment(TorchVectorizedObject):
 
     # set env action for a particular agent
     def _set_action(self, action, agent):
+        # print("set_action:{}".format(action))
         action = action.clone()
         if not self.grad_enabled:
             action = action.detach()

@@ -59,7 +59,8 @@ class RobotPathGenerator:
 class Scenario(BaseScenario):
     def make_world(self, batch_dim: int, device: torch.device, **kwargs):
         self.plot_grid = True
-        self.n_agents = kwargs.get("n_agents", 5)
+        self.n_agents = kwargs.get("n_agents", 4)
+        self.init_positions_noise_level = kwargs.get("init_position_noise_level", 0)
         self.collisions = kwargs.get("collisions", True)
         self.viewer_size = (1000, 700)
         self.plot_grid = True
@@ -77,13 +78,13 @@ class Scenario(BaseScenario):
         self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1)
         self.final_reward = kwargs.get("final_reward", 0.2)
 
-        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -1)
+        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -100)
 
         self.min_distance_between_entities = self.agent_radius * 2 + 0.05
         self.world_semidim = 5
         self.min_collision_distance = 0.005
         generator = RobotPathGenerator()
-
+        self.current_formation_type = "ren_shape"
         # Parameters
         x_max, y_max = 3.0, 3.0  # bounds
         num_steps = 1000  # number of steps in the path
@@ -122,7 +123,13 @@ class Scenario(BaseScenario):
         )
         entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, Agent)
 
-
+        self.leader_robot = Landmark(
+                name=f"leader_robot",
+                collide=False,
+                movable=True,
+                rotatable=True,
+                color=Color.RED,
+            )
         self.formation_center = Landmark(
                 name=f"formation center",
                 collide=False,
@@ -173,9 +180,10 @@ class Scenario(BaseScenario):
                 rotatable=True,
                 color=modified_color,
             )
-            world.add_landmark(self.formation_goals_modified[i])
+            # world.add_landmark(self.formation_goals_modified[i])
         world.add_landmark(self.formation_center)
-
+        world.add_landmark(self.leader_robot)
+        # print("formation_center shape:{}".format(self.formation_center.state.pos.shape))
         # self.walls = []
         # for i in range(4):
         #     wall = Landmark(
@@ -187,8 +195,8 @@ class Scenario(BaseScenario):
         #     world.add_landmark(wall)
         #     self.walls.append(wall)
 
-        self.obstacle_pattern = 0
-        # self.create_obstacles(self.obstacle_pattern, world)
+        self.obstacle_pattern = 2
+        self.create_obstacles(self.obstacle_pattern, world)
 
         def detect_obstacles(x):
             return x.name.startswith("obs_") or x.name.startswith("agent_") or x.name.startswith("wall")
@@ -226,8 +234,43 @@ class Scenario(BaseScenario):
             agent.pos_rew = torch.zeros(batch_dim, device=device)
             agent.angle_rew = torch.zeros(batch_dim, device=device)
             agent.agent_collision_rew = agent.pos_rew.clone()
+            agent.target_distance = torch.zeros(batch_dim, device=device)
             world.add_agent(agent)
-
+            if i == 0:
+                agent.set_pos(
+                    torch.tensor(
+                        [
+                            -4,
+                            0,
+                        ],
+                        device=device,
+                    ),
+                    batch_index=None,
+                )
+            elif i == 1:
+                #-3.6464,  0.3536
+                agent.set_pos(    
+                    torch.tensor(
+                        [
+                            -3.6464,
+                            0.3536,
+                        ],
+                        device=device,
+                    ),
+                    batch_index=None,
+                )
+            elif i == 2:
+                #-3.6464, -0.3536
+                agent.set_pos(    
+                    torch.tensor(
+                        [
+                            -3.6464,
+                            -0.3536,
+                        ],
+                        device=device,
+                    ),
+                    batch_index=None,
+                )
             # Add goals
             
             agent.goal = self.formation_goals_landmark[i]
@@ -359,7 +402,7 @@ class Scenario(BaseScenario):
                     pos = torch.tensor(
                         [
                             0,
-                            3,
+                            2.5,
                         ],
                         dtype=torch.float32,
                         device=self.world.device,
@@ -369,7 +412,7 @@ class Scenario(BaseScenario):
                     pos = torch.tensor(
                     [
                         0,
-                        -3,
+                        -2.5,
                     ],
                     dtype=torch.float32,
                     device=self.world.device,
@@ -407,6 +450,7 @@ class Scenario(BaseScenario):
             (-self.world_semidim+1, -3),
             (-self.world_semidim+4, self.world_semidim-4),
         )
+
         ScenarioUtils.spawn_entities_randomly(
             self.world.landmarks,
             self.world,
@@ -422,7 +466,57 @@ class Scenario(BaseScenario):
             occupied_positions = occupied_positions[env_index].unsqueeze(0)
 
         goal_poses = []
-        for _ in self.world.agents:
+        noise_scale = self.init_positions_noise_level
+        for i, agent in enumerate(self.world.agents):
+            noise = torch.randn(2) * noise_scale
+            noise = noise.to(self.device)
+            if i == 0:
+                agent.set_pos(
+                    torch.tensor(
+                        [
+                            -4.3536, 
+                            -0.3536,
+                        ],
+                        device=self.world.device,
+                    ) + noise,
+                    batch_index=env_index,
+                )
+            elif i == 1:
+                #-3.6464,  0.3536
+                agent.set_pos(    
+                    torch.tensor(
+                        [
+                            -4.3536,  
+                            0.3536,
+                        ],
+                        device=self.world.device,
+                    ) + noise,
+                    batch_index=env_index,
+                )
+            elif i == 2:
+                #-3.6464, -0.3536
+                agent.set_pos(    
+                    torch.tensor(
+                        [ 
+                            -4.7071,
+                            -0.7071,
+                        ],
+                        device=self.world.device,
+                    ) + noise,
+                    batch_index=env_index,
+                )
+            elif i == 3:
+                #-3.6464, -0.3536
+                agent.set_pos(    
+                    torch.tensor(
+                        [
+                            -4.7071,
+                            0.7071,
+                        ],
+                        device=self.world.device,
+                    ) + noise,
+                    batch_index=env_index,
+                )
             position = ScenarioUtils.find_random_pos_for_entity(
                 occupied_positions=occupied_positions,
                 env_index=env_index,
@@ -472,6 +566,49 @@ class Scenario(BaseScenario):
                     )
                     * self.pos_shaping_factor
                 )
+        for i, agent in enumerate(self.world.agents):
+            current_agent_index = self.world.agents.index(agent)
+            target_positions_dict = {}
+            target_rotations_dict = {}
+            for a_index, agent in enumerate(self.world.agents):
+                target_positions_dict[a_index] = agent.state.pos
+                target_rotations_dict[a_index] = agent.state.rot
+
+            batch_size = next(iter(target_positions_dict.values())).shape[0]
+            num_agents = len(target_positions_dict)
+
+            formation_goals_positions = []
+            for i in range(num_agents):
+                formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
+            formation_goals_positions = torch.stack(formation_goals_positions)
+
+            # print("formation_goals_positions shape{},:{}".format(formation_goals_positions.shape, formation_goals_positions))
+            # print("target_positions:{}".format(target_positions_dict))
+
+            for batch_idx in range(batch_size):
+                # Extract positions for the current batch
+                target_positions = torch.stack([target_positions_dict[i][batch_idx] for i in range(num_agents)])
+
+                # Calculate the cost matrix based on distances
+                cost_matrix = torch.cdist(target_positions, formation_goals_positions)
+
+                # Solve the assignment problem
+                row_ind, col_ind = linear_sum_assignment(cost_matrix.cpu().detach().numpy())
+                
+                # Find the index in the assignment for the current agent
+                agent_assignment_idx = row_ind.tolist().index(current_agent_index)
+                assigned_goal_idx = col_ind[agent_assignment_idx]
+                
+                # Calculate the distance from the current agent to its assigned goal
+                agent_position = target_positions[current_agent_index]
+                assigned_goal_position = formation_goals_positions[assigned_goal_idx]
+                distance_to_goal = torch.norm(agent_position - assigned_goal_position)
+                # Normalize the distance to get the reward (assuming max reward is 1.0)
+                # max_distance = torch.norm(formation_goals_positions - formation_goals_positions.mean(dim=0), dim=1).max().item()
+                # reward = 1.0 - (distance_to_goal.item() / max_distance)
+                # reward = max(reward, 0.0)  # Ensure the reward is non-negative
+                agent.target_distance[batch_idx] = distance_to_goal
+
         # if env_index is None:
         #     self.t = torch.zeros(self.world.batch_dim, device=self.world.device)
         # else:
@@ -479,7 +616,7 @@ class Scenario(BaseScenario):
         # if env_index is None:
             # self.t = torch.zeros(self.world.batch_dim, device=self.world.device)
         # else:
-        # self.spawn_obstacles(self.obstacle_pattern, env_index)
+        self.spawn_obstacles(self.obstacle_pattern, env_index)
         # self.spawn_walls(env_index)
         self.t = 0
 
@@ -578,7 +715,17 @@ class Scenario(BaseScenario):
             elif formation_movement == "horizental":
                 ###move from left to right, test formation's ability to cross through tunnel
                 t = self.t / 30
-                if self.t < 1000:
+                if self.t < 100:
+                    self.leader_robot.set_pos(
+                        torch.tensor(
+                            [
+                                 -4,
+                                0,
+                            ],
+                            device=self.world.device,
+                        ),
+                        batch_index=None,
+                    )
                     self.formation_center.set_pos(
                         torch.tensor(
                             [
@@ -592,6 +739,16 @@ class Scenario(BaseScenario):
                     self.formation_center_pos[0] = -4
                     self.formation_center_pos[1] = 0
                 else:
+                    self.leader_robot.set_pos(
+                        torch.tensor(
+                            [
+                                (self.t-100)/30*0.5 - 4,
+                                0,
+                            ],
+                            device=self.world.device,
+                        ),
+                        batch_index=None,
+                    )
                     self.formation_center.set_pos(
                         torch.tensor(
                             [
@@ -604,6 +761,13 @@ class Scenario(BaseScenario):
                     )
                     self.formation_center_pos[0] = ((self.t-100)/30*0.5 - 4)
                     self.formation_center_pos[1] = 0
+                self.leader_robot.set_rot(
+                    torch.tensor(
+                        torch.pi,
+                        device=self.world.device,
+                    ),
+                    batch_index=None,
+                )
                 self.formation_center.set_rot(
                     torch.tensor(
                         torch.pi,
@@ -616,47 +780,42 @@ class Scenario(BaseScenario):
 
             
         
-        angles = [-135/180.0*math.pi, -135/180.0*math.pi, 135/180.0*math.pi, 135/180.0*math.pi]
-        dists = [0.5, 1, 0.5, 1]
+        angles = [-135/180.0*math.pi, 135/180.0*math.pi, -135/180.0*math.pi,  135/180.0*math.pi]
+        dists = [-0.5, -0.5, -1, -1]
         for i, world_agent in enumerate(self.world.agents):
             if agent == world_agent:
-                if i == 0:
-                    self.formation_goals[i][0] = self.formation_center_pos[0]
+
+                # formation_type = "line"
+                # formation_type = "rectangle"
+                
+                # if self.t < 200:
+                #     formation_type = "rectangle"
+                # else:
+                #     formation_type = "ren_shape"
+                if self.current_formation_type == "ren_shape":
+                    #大雁人字形
+                    angles = [-135/180.0*math.pi, 135/180.0*math.pi, -135/180.0*math.pi,  135/180.0*math.pi]
+                    dists = [-0.5, -0.5, -1, -1]
+                    self.formation_goals[i][0] = self.formation_center_pos[0] + math.cos(self.formation_center_pos[2] + angles[i]) * dists[i]
+                    self.formation_goals[i][1] = self.formation_center_pos[1] + math.sin(self.formation_center_pos[2] + angles[i]) * dists[i]
+                elif self.current_formation_type == "vertical_line":
+                    dists = [0.5, 1, -0.5, -1]
+                    self.formation_goals[i][0] = self.formation_center_pos[0] 
+                    self.formation_goals[i][1] = self.formation_center_pos[1] + dists[i-1]
+                
+                
+                elif self.current_formation_type == "line":
+                    #直线型
+                    dists = [-0.5, -1, -1.5, -2]
+                    self.formation_goals[i][0] = self.formation_center_pos[0] + dists[i-1]
                     self.formation_goals[i][1] = self.formation_center_pos[1]
-                    self.formation_goals[i][2] = self.formation_center_pos[2]
-                else:
-
-
-                    formation_type = "ren_shape"
-                    # formation_type = "line"
-                    # formation_type = "rectangle"
-                    
-                    # if self.t < 200:
-                    #     formation_type = "rectangle"
-                    # else:
-                    #     formation_type = "ren_shape"
-                    if formation_type == "ren_shape":
-                        #大雁人字形
-                        self.formation_goals[i][0] = self.formation_center_pos[0] + math.cos(self.formation_center_pos[2] + angles[i-1]) * dists[i-1]
-                        self.formation_goals[i][1] = self.formation_center_pos[1] + math.sin(self.formation_center_pos[2] + angles[i-1]) * dists[i-1]
-                    elif formation_type == "vertical_line":
-                        dists = [0.5, 1, -0.5, -1]
-                        self.formation_goals[i][0] = self.formation_center_pos[0] 
-                        self.formation_goals[i][1] = self.formation_center_pos[1] + dists[i-1]
-                    
-                    
-                    elif formation_type == "line":
-                        #直线型
-                        dists = [0.5, 1, -0.5, -1]
-                        self.formation_goals[i][0] = self.formation_center_pos[0] + dists[i-1]
-                        self.formation_goals[i][1] = self.formation_center_pos[1]
-                    elif formation_type == "rectangle":
-                        #矩形
-                        displacement_x = [1, -1, 1, -1]
-                        displacement_y = [1, 1, -1, -1]
-                        self.formation_goals[i][0] = self.formation_center_pos[0] + displacement_x[i-1]
-                        self.formation_goals[i][1] = self.formation_center_pos[1] + displacement_y[i-1]
-                    self.formation_goals[i][2] = self.formation_center_pos[2]
+                elif self.current_formation_type == "rectangle":
+                    #矩形
+                    displacement_x = [1, -1, 1, -1]
+                    displacement_y = [1, 1, -1, -1]
+                    self.formation_goals[i][0] = self.formation_center_pos[0] + displacement_x[i-1]
+                    self.formation_goals[i][1] = self.formation_center_pos[1] + displacement_y[i-1]
+                self.formation_goals[i][2] = self.formation_center_pos[2]
                 self.formation_goals_landmark[i].set_pos(
                 torch.tensor(
                     [
@@ -676,39 +835,29 @@ class Scenario(BaseScenario):
                 ),
                 batch_index=None,
                 )
+                # print("formation goal {}, {}".format(i, self.formation_goals_landmark[i].state.pos))
 
     def reward(self, agent: Agent):
+        current_agent_index = self.world.agents.index(agent)
         is_first = agent == self.world.agents[0]
         # if is_first:
         #     print("agent:{}".format(0))
         # else:
         #     print("agent else")
-        # if self.shared_rew:
+        # if self.shared_rew:'
         #     print("shared reward")
         # else:
         #     print("not shared reward")
-
+        agent.agent_collision_rew[:] = 0
         if is_first:
             self.t += 1
             self.pos_rew[:] = 0
             self.final_rew[:] = 0
             self.angle_rew[:] = 0
             self.formation_maintain_rew[:] = 0
-            # print("---------------------before----------------------")
-            self.formation_maintain_rew = self.agent_reward_graph_formation_maintained()
-            for a in self.world.agents:
-                self.pos_rew += self.agent_reward(a)
-                self.angle_rew += self.agent_angle_reward(a) 
+            for i, a in enumerate(self.world.agents):
                 a.agent_collision_rew[:] = 0
-            # print("---------------------after-------------------------")
-
-            self.all_goal_reached = torch.all(
-                torch.stack([a.on_goal for a in self.world.agents], dim=-1),
-                dim=-1,
-            )
-
-            self.final_rew[self.all_goal_reached] = self.final_reward
-
+                a.pos_rew[:] = 0
             for i, a in enumerate(self.world.agents):
                 for j, b in enumerate(self.world.agents):
                     if i <= j:
@@ -721,32 +870,191 @@ class Scenario(BaseScenario):
                         b.agent_collision_rew[
                             distance <= self.min_collision_distance
                         ] += self.agent_collision_penalty
+        # if is_first:
+            for i, a in enumerate(self.world.agents):
+                for obs in self.obstacles:
+                    # if self.world.collides(a, obs):
+                    distance = self.world.get_distance(a, obs)
+                    a.agent_collision_rew[
+                        distance <= self.min_collision_distance
+                    ] += self.agent_collision_penalty    
+            
+            # print("---------------------before----------------------")
+            self.formation_maintain_rew = self.agent_reward_graph_formation_maintained()
+        agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
+                # self.angle_rew += self.agent_angle_reward(a) 
+            # print("---------------------after-------------------------")
 
-            # for i, a in enumerate(self.world.agents):
-            #     for obs in self.obstacles:
-            #         if self.world.collides(a, obs):
-            #             distance = self.world.get_distance(a, obs)
-            #             a.agent_collision_rew[
-            #                 distance <= self.min_collision_distance
-            #             ] += self.agent_collision_penalty
+            # self.all_goal_reached = torch.all(
+            #     torch.stack([a.on_goal for a in self.world.agents], dim=-1),
+            #     dim=-1,
+            # )
 
-        pos_reward = self.pos_rew if self.shared_rew else agent.pos_rew
+            # self.final_rew[self.all_goal_reached] = self.final_reward
+
+            
+
+            
+
+        pos_reward =  agent.pos_rew
         angle_reward = self.angle_rew if self.shared_rew else agent.angle_rew
         # return 5*pos_reward + self.final_rew + agent.agent_collision_rew + angle_reward
-        return self.formation_maintain_rew + agent.agent_collision_rew
+        # return self.formation_maintain_rew + agent.agent_collision_rew
+        # print("agent {} pos reward:{} collsition reward:{}".format(current_agent_index, pos_reward, agent.agent_collision_rew))
+        return pos_reward + agent.agent_collision_rew + self.formation_maintain_rew
     
-    
+
+
+    def normalize_positions(self, positions):
+        # Calculate relative positions to the center
+        relative_positions = positions - torch.tensor(self.formation_center_pos[:2], device=self.device)
+        
+        # Calculate distances and angles
+        dists = torch.norm(relative_positions, dim=1)
+        angles = torch.atan2(relative_positions[:, 1], relative_positions[:, 0])
+        
+        # Normalize distances
+        max_dist = dists.max()
+        normalized_dists = dists / max_dist
+        
+        # Convert back to Cartesian coordinates
+        normalized_positions = torch.stack([
+            normalized_dists * torch.cos(angles),
+            normalized_dists * torch.sin(angles)
+        ], dim=1)
+        
+        return normalized_positions
 
 
     def agent_reward_graph_formation_maintained(self):
+        target_positions_dict = {}
+        for a_index, agent in enumerate(self.world.agents):
+            target_positions_dict[a_index] = agent.state.pos
+
+        batch_size = next(iter(target_positions_dict.values())).shape[0]
+        graph_connect_rew = torch.zeros(batch_size, device=self.device)
+        num_agents = len(target_positions_dict)
+        
+        formation_goals_positions = []
+        for i in range(num_agents):
+            angles = [-135 / 180.0 * math.pi, 135 / 180.0 * math.pi, -135 / 180.0 * math.pi, 135 / 180.0 * math.pi]
+            dists = [-0.5, -0.5, -1, -1]
+            goal_x = self.formation_center_pos[0] + math.cos(self.formation_center_pos[2] + angles[i]) * dists[i]
+            goal_y = self.formation_center_pos[1] + math.sin(self.formation_center_pos[2] + angles[i]) * dists[i]
+            formation_goals_positions.append(torch.tensor([goal_x, goal_y], device=self.device))
+        formation_goals_positions = torch.stack(formation_goals_positions)
+
+        for batch_idx in range(batch_size):
+            target_positions = torch.stack([target_positions_dict[i][batch_idx] for i in range(num_agents)])
+            
+            # Normalize positions to unit formation
+            normalized_target_positions = self.normalize_positions(target_positions)
+            normalized_formation_goals_positions = self.normalize_positions(formation_goals_positions)
+            
+            # Calculate the cost matrix based on distances
+            cost_matrix = torch.cdist(normalized_target_positions, normalized_formation_goals_positions)
+
+            # Solve the assignment problem
+            row_ind, col_ind = linear_sum_assignment(cost_matrix.cpu().detach().numpy())
+
+            # Calculate the total distance for the optimal assignment
+            total_distance = cost_matrix[row_ind, col_ind].sum()
+
+            # Normalize the distance to get the reward (assuming max reward is 1.0)
+            max_distance = (num_agents * torch.norm(normalized_formation_goals_positions - normalized_formation_goals_positions.mean(dim=0), dim=1).max()).item()
+            reward = 1.0 - (total_distance.item() / max_distance)
+            reward = max(reward, 0.0)  # Ensure the reward is non-negative
+
+            graph_connect_rew[batch_idx] = reward
+
+        return graph_connect_rew
+
+    # def agent_reward_graph_formation_maintained(self):
+    #     target_positions_dict = {}
+    #     target_rotations_dict = {}
+    #     for a_index, agent in enumerate(self.world.agents):
+    #         target_positions_dict[a_index] = agent.state.pos
+    #         target_rotations_dict[a_index] = agent.state.rot
+            
+    #     batch_size = next(iter(target_positions_dict.values())).shape[0]
+    #     graph_connect_rew = torch.zeros(batch_size, device=self.device) 
+    #     num_agents = len(target_positions_dict)
+
+    #     formation_goals_positions = []
+    #     for i in range(num_agents):
+    #         formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
+    #     formation_goals_positions = torch.stack(formation_goals_positions)
+
+    #     def geometric_center(positions):
+    #         return torch.mean(positions, dim=0)
+
+    #     for batch_idx in range(batch_size):
+    #         target_positions = torch.stack([target_positions_dict[i][batch_idx] for i in range(num_agents)])
+    #         formation_center = geometric_center(formation_goals_positions)
+    #         target_center = geometric_center(target_positions)
+    #         # print("formation_goals_positions shape:{}".format(formation_goals_positions.shape))
+    #         # print("target_positions shape:{}".format(target_positions.shape))
+    #         # print("target_center shape:{}".format(target_center.shape))
+    #         # Center the positions
+    #         #begin for matching error reward
+
+    #         centered_formation_positions = formation_goals_positions - formation_center
+    #         centered_target_positions = target_positions - target_center
+    #         # print("centered_target-positions shape:{}".format(centered_target_positions.shape))
+    #         # Calculate the optimal assignment using the Hungarian algorithm (linear_sum_assignment)
+    #         # print("centered_formation_positions shape:{}".format(centered_formation_positions.shape))
+    #         cost_matrix = torch.cdist(centered_target_positions, centered_formation_positions)
+    #         # print("cost_matrix shape:{}".format(cost_matrix.shape))
+    #         # Ensure cost_matrix is 2D (num_agents x num_agents)
+    #         if cost_matrix.dim() != 2:
+    #             raise ValueError("Cost matrix must be 2D")
+            
+    #         row_ind, col_ind = linear_sum_assignment(cost_matrix.cpu().detach().numpy())
+            
+    #         optimal_assignment_distances = cost_matrix[row_ind, col_ind]
+            
+    #         # Calculate the optimal scale factor
+    #         optimal_scale_factor = (torch.norm(centered_target_positions[row_ind], dim=1) / torch.norm(centered_formation_positions[col_ind], dim=1)).mean()
+
+    #         # Scale the formation positions
+    #         scaled_formation_positions = centered_formation_positions * optimal_scale_factor
+
+    #         # Calculate the rotation matrix using Singular Value Decomposition (SVD)
+    #         H = torch.matmul(centered_target_positions[row_ind].T, scaled_formation_positions[col_ind])
+    #         U, S, Vt = torch.linalg.svd(H)
+    #         rotation_matrix = torch.matmul(U, Vt)
+
+    #         # Rotate the formation positions
+    #         rotated_formation_positions = torch.matmul(scaled_formation_positions, rotation_matrix.T)
+
+    #         # Calculate the matching error
+    #         matching_error = torch.norm(centered_target_positions[row_ind] - rotated_formation_positions[col_ind], dim=1).mean()
+
+    #         #end for matching_error reward
+
+
+            
+    #         center_matching_error = torch.norm(target_center - formation_center).item()
+    #         # print("matching_error:{}".format(matching_error))
+    #         # print("center error:{}".format(center_matching_error))
+    #         # Calculate the reward
+    #         max_reward = 1.0
+    #         reward = max_reward - (matching_error.item() + center_matching_error)
+    #         # reward = max_reward - center_matching_error
+    #         graph_connect_rew[batch_idx] = reward
+    #         # Calculate the reward
+    #     # print("formation_maintain reward:{}".format(graph_connect_rew))
+    #     return graph_connect_rew
+
+    def single_agent_reward_graph_formation_maintained(self, agent):
+        current_agent_index = self.world.agents.index(agent)
         target_positions_dict = {}
         target_rotations_dict = {}
         for a_index, agent in enumerate(self.world.agents):
             target_positions_dict[a_index] = agent.state.pos
             target_rotations_dict[a_index] = agent.state.rot
-            
+
         batch_size = next(iter(target_positions_dict.values())).shape[0]
-        graph_connect_rew = torch.zeros(batch_size, device=self.device) 
         num_agents = len(target_positions_dict)
 
         formation_goals_positions = []
@@ -754,71 +1062,41 @@ class Scenario(BaseScenario):
             formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
         formation_goals_positions = torch.stack(formation_goals_positions)
 
-        def geometric_center(positions):
-            return torch.mean(positions, dim=0)
+        # print("formation_goals_positions shape{},:{}".format(formation_goals_positions.shape, formation_goals_positions))
+        # print("target_positions:{}".format(target_positions_dict))
 
         for batch_idx in range(batch_size):
+            # Extract positions for the current batch
             target_positions = torch.stack([target_positions_dict[i][batch_idx] for i in range(num_agents)])
-            formation_center = geometric_center(formation_goals_positions)
-            target_center = geometric_center(target_positions)
-            # print("formation_goals_positions shape:{}".format(formation_goals_positions.shape))
-            # print("target_positions shape:{}".format(target_positions.shape))
-            # print("target_center shape:{}".format(target_center.shape))
-            # Center the positions
 
+            # Calculate the cost matrix based on distances
+            cost_matrix = torch.cdist(target_positions, formation_goals_positions)
 
-
-            #begin for matching error reward
-
-            centered_formation_positions = formation_goals_positions - formation_center
-            centered_target_positions = target_positions - target_center
-            # print("centered_target-positions shape:{}".format(centered_target_positions.shape))
-            # Calculate the optimal assignment using the Hungarian algorithm (linear_sum_assignment)
-            # print("centered_formation_positions shape:{}".format(centered_formation_positions.shape))
-            cost_matrix = torch.cdist(centered_target_positions, centered_formation_positions)
-            # print("cost_matrix shape:{}".format(cost_matrix.shape))
-            # Ensure cost_matrix is 2D (num_agents x num_agents)
-            if cost_matrix.dim() != 2:
-                raise ValueError("Cost matrix must be 2D")
-            
+            # Solve the assignment problem
             row_ind, col_ind = linear_sum_assignment(cost_matrix.cpu().detach().numpy())
             
-            optimal_assignment_distances = cost_matrix[row_ind, col_ind]
+            # Find the index in the assignment for the current agent
+            agent_assignment_idx = row_ind.tolist().index(current_agent_index)
+            assigned_goal_idx = col_ind[agent_assignment_idx]
             
-            # Calculate the optimal scale factor
-            optimal_scale_factor = (torch.norm(centered_target_positions[row_ind], dim=1) / torch.norm(centered_formation_positions[col_ind], dim=1)).mean()
+            # Calculate the distance from the current agent to its assigned goal
+            agent_position = target_positions[current_agent_index]
+            assigned_goal_position = formation_goals_positions[assigned_goal_idx]
+            distance_to_goal = torch.norm(agent_position - assigned_goal_position)
+            # Normalize the distance to get the reward (assuming max reward is 1.0)
+            # max_distance = torch.norm(formation_goals_positions - formation_goals_positions.mean(dim=0), dim=1).max().item()
+            # reward = 1.0 - (distance_to_goal.item() / max_distance)
+            # reward = max(reward, 0.0)  # Ensure the reward is non-negative
 
-            # Scale the formation positions
-            scaled_formation_positions = centered_formation_positions * optimal_scale_factor
+            reward = agent.target_distance[batch_idx] - distance_to_goal
+            agent.target_distance[batch_idx] = distance_to_goal
 
-            # Calculate the rotation matrix using Singular Value Decomposition (SVD)
-            H = torch.matmul(centered_target_positions[row_ind].T, scaled_formation_positions[col_ind])
-            U, S, Vt = torch.linalg.svd(H)
-            rotation_matrix = torch.matmul(U, Vt)
+            if distance_to_goal.item() < 0.02:
+                reward += 1.0
+            # print("agent {} reward {}".format(current_agent_index, reward))
+            agent.pos_rew[batch_idx] = reward
 
-            # Rotate the formation positions
-            rotated_formation_positions = torch.matmul(scaled_formation_positions, rotation_matrix.T)
-
-            # Calculate the matching error
-            matching_error = torch.norm(centered_target_positions[row_ind] - rotated_formation_positions[col_ind], dim=1).mean()
-
-            #end for matching_error reward
-
-
-            
-            center_matching_error = torch.norm(target_center - formation_center).item()
-            # print("matching_error:{}".format(matching_error))
-            # print("center error:{}".format(center_matching_error))
-            # Calculate the reward
-            max_reward = 1.0
-            reward = max_reward - (matching_error.item() + center_matching_error)
-            # reward = max_reward - center_matching_error
-            graph_connect_rew[batch_idx] = reward
-            # Calculate the reward
-        # print("formation_maintain reward:{}".format(graph_connect_rew))
-        return graph_connect_rew
-
-
+        return agent.pos_rew
 
 
     #when robot and goal is one-on-one 
@@ -931,27 +1209,184 @@ class Scenario(BaseScenario):
     def observation(self, agent: Agent):
         goal_poses = []
         goal_rot_poses = []
-        observations = [agent.state.pos, agent.state.vel]
+        current_agent_index = self.world.agents.index(agent)
+        target_positions_dict = {}
+        for a_index, agent in enumerate(self.world.agents):
+            target_positions_dict[a_index] = agent.state.pos
+
+        batch_size = next(iter(target_positions_dict.values())).shape[0]
+        num_agents = len(target_positions_dict)
+
+        formation_goals_positions = []
+        for i in range(num_agents):
+            formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
+        formation_goals_positions = torch.stack(formation_goals_positions)
+
+        # print("formation_goals_positions shape{},:{}".format(formation_goals_positions.shape, formation_goals_positions))
+        # print("target_positions:{}".format(target_positions_dict))
+        relative_goal_position_list = []
+        for batch_idx in range(batch_size):
+            # Extract positions for the current batch
+            target_positions = torch.stack([target_positions_dict[i][batch_idx] for i in range(num_agents)])
+
+            # Calculate the cost matrix based on distances
+            cost_matrix = torch.cdist(target_positions, formation_goals_positions)
+
+            # Solve the assignment problem
+            row_ind, col_ind = linear_sum_assignment(cost_matrix.cpu().detach().numpy())
+            
+            # Find the index in the assignment for the current agent
+            agent_assignment_idx = row_ind.tolist().index(current_agent_index)
+            assigned_goal_idx = col_ind[agent_assignment_idx]
+            
+            # Calculate the distance from the current agent to its assigned goal
+            agent_position = target_positions[current_agent_index]
+            assigned_goal_position = formation_goals_positions[assigned_goal_idx]
+            relative_goal_position = assigned_goal_position - agent_position
+            relative_goal_position_list.append(relative_goal_position)
+        relative_goal_position_tensor = torch.stack(relative_goal_position_list)
+        relative_goal_position_tensor_list = []
+        relative_goal_position_tensor_list.append(relative_goal_position_tensor)
+
+
+        relative_to_other_robots_pose = []
+        relative_to_other_formation_pose = []
+
+        formation_goals_positions = []
+        for i in range(len(self.world.agents)):
+            # formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
+            relative_to_other_formation_pose.append(self.formation_goals_landmark[i].state.pos - agent.state.pos)
+        # formation_goals_positions = torch.stack(formation_goals_positions)
+        # #follower robots
+        
+
+        relative_to_leader_pose = [self.leader_robot.state.pos - agent.state.pos]
+        for a in self.world.agents:
+            if a != agent:
+                relative_to_other_robots_pose.append(a.state.pos - agent.state.pos)
+
+        
+        # print("observation:{}".format(agent.state.pos))
+        # observations = [agent.state.pos, agent.state.vel]
 
     # Add positions and velocities of all agents (including the current agent)
         # for a in self.world.agents:
-        #     observations.append(a.state.pos)
-        #     observations.append(a.state.vel)
+        #     if a != agent:
+        #         observations.append(a.state.pos)
+        # formation_type = "ren_shape"
+                   
+        # if formation_type == "ren_shape":
+        #     #大雁人字形
+        #     self.formation_goals[i][0] = self.formation_center_pos[0] + math.cos(self.formation_center_pos[2] + angles[i-1]) * dists[i-1]
+        #     self.formation_goals[i][1] = self.formation_center_pos[1] + math.sin(self.formation_center_pos[2] + angles[i-1]) * dists[i-1]
+        # elif formation_type == "vertical_line":
+        #     dists = [0.5, 1, -0.5, -1]
+        #     self.formation_goals[i][0] = self.formation_center_pos[0] 
+        #     self.formation_goals[i][1] = self.formation_center_pos[1] + dists[i-1]
+        
+        
+        # elif formation_type == "line":
+        #     #直线型
+        #     dists = [0.5, 1, -0.5, -1]
+        #     self.formation_goals[i][0] = self.formation_center_pos[0] + dists[i-1]
+        #     self.formation_goals[i][1] = self.formation_center_pos[1]
+        # elif formation_type == "rectangle":
+        #     #矩形
+        #     displacement_x = [1, -1, 1, -1]
+        #     displacement_y = [1, 1, -1, -1]
+        #     self.formation_goals[i][0] = self.formation_center_pos[0] + displacement_x[i-1]
+        #     self.formation_goals[i][1] = self.formation_center_pos[1] + displacement_y[i-1]
+        # self.formation_goals[i][2] = self.formation_center_pos[2]
 
-        if self.observe_all_goals:
-            for g in self.formation_goals_landmark.values():
-                goal_poses.append(g.state.pos.clone())
-        else:
-            goal_poses.append(agent.state.pos - agent.goal.state.pos)
+
+
+        if self.current_formation_type == "ren_shape":
+            for i in range(len(self.world.agents)):
+                if i == 0:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -0.3536
+                    goal_pose_tensor[:, 1] = 0.3536
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 1:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -0.3536
+                    goal_pose_tensor[:, 1] = -0.3536
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 2:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -0.7071
+                    goal_pose_tensor[:, 1] = 0.7071
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 3:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -0.7071
+                    goal_pose_tensor[:, 1] = -0.7071
+                    goal_poses.append(goal_pose_tensor)
+        elif self.current_formation_type == "vertical_line":
+            for i in range(len(self.world.agents)):
+                if i == 0:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = 0
+                    goal_pose_tensor[:, 1] = 0.5
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 1:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = 0
+                    goal_pose_tensor[:, 1] = -0.5
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 2:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = 0
+                    goal_pose_tensor[:, 1] = 1
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 3:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = 0
+                    goal_pose_tensor[:, 1] = -1
+                    goal_poses.append(goal_pose_tensor)   
+        elif self.current_formation_type == "line":
+            for i in range(len(self.world.agents)):
+                if i == 0:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -0.5
+                    goal_pose_tensor[:, 1] = 0
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 1:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -1
+                    goal_pose_tensor[:, 1] = 0
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 2:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -1.5
+                    goal_pose_tensor[:, 1] = 0
+                    goal_poses.append(goal_pose_tensor)
+                elif i == 3:
+                    goal_pose_tensor = torch.zeros((self.world.batch_dim, 2)).to(self.device)
+                    goal_pose_tensor[:, 0] = -2
+                    goal_pose_tensor[:, 1] = 0
+                    goal_poses.append(goal_pose_tensor)
+        elif self.current_formation_type == "rectangle":
+            pass
         # goal_rot_poses.append(agent.state.rot - agent.goal.state.rot)
+
+        # observation_tensor = torch.cat(relative_goal_position_tensor_list + relative_to_other_robots_pose + (
+        #         [(agent.sensors[0]._max_range - agent.sensors[0].measure()) / agent.sensors[0]._max_range]
+        #         if self.collisions
+        #         else []
+        #     ),
+        #     dim=-1
+        # )
         observation_tensor = torch.cat(
-            observations + goal_poses  +  (
-                [agent.sensors[0]._max_range - agent.sensors[0].measure()]
+            relative_to_leader_pose + relative_to_other_robots_pose + relative_to_other_formation_pose +relative_goal_position_tensor_list+ (
+                [(agent.sensors[0]._max_range - agent.sensors[0].measure()) / agent.sensors[0]._max_range]
                 if self.collisions
                 else []
             ),
             dim=-1
         )
+        # print("agent {} obs:{} shape:{}".format(current_agent_index, observation_tensor, observation_tensor.shape))
+
         return observation_tensor
 
     # def observation(self, agent: Agent):
@@ -1010,10 +1445,14 @@ class Scenario(BaseScenario):
         return done_status
 
     def info(self, agent: Agent) -> Dict[str, Tensor]:
+        # print("info agent pos:{}".format(agent.state.pos))
         return {
             "pos_rew": self.pos_rew if self.shared_rew else agent.pos_rew,
             "final_rew": self.final_rew,
             "agent_collisions": agent.agent_collision_rew,
+            "formation_goal": agent.goal.state.pos,
+            "formation_main_rew":self.formation_maintain_rew,
+            "agent_pos": agent.state.pos,
         }
 
     def extra_render(self, env_index: int = 0) -> "List[Geom]":
@@ -1107,10 +1546,77 @@ class Scenario(BaseScenario):
         #     geoms.append(line)
         return geoms
 
+# class HeuristicPolicy(BaseHeuristicPolicy):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#         self.max_speed = 1.0
+#         self.max_rotation = 0.1
 
+#     def compute_action(self, observation: torch.Tensor, u_range: float) -> torch.Tensor:
+#         print("obs shape:{}".format(observation.shape))
+#         self.n_env = observation.shape[0]
+#         self.device = observation.device
+#         agent_pos = observation[:, :2]
+#         # agent_vel = observation[:, 2:4]
+#         package_pos = observation[:, 6:8] + agent_pos
+#         goal_pos = -observation[:, 4:6] + package_pos
+
+#         # def expert_policy(observations, formation_goals_positions, device, max_speed=1.0, max_rotation=0.1):
+#         batch_size, num_agents, obs_size = observations.shape
+#         actions = torch.zeros((batch_size, num_agents, 3), device=device)
+
+#         for b in range(batch_size):
+#             batch_observations = observations[b]
+#             batch_goals = formation_goals_positions[b]
+
+#             # Calculate the cost matrix based on the distance between observations and formation goals
+#             cost_matrix = torch.cdist(batch_observations[:, :2], batch_goals)
+            
+#             # Solve the assignment problem to minimize the travel distance
+#             row_ind, col_ind = linear_sum_assignment(cost_matrix.cpu().detach().numpy())
+
+#             # Calculate the actions to move towards the assigned goals
+#             for i in range(num_agents):
+#                 print("col_ind:{}".format(col_ind))
+#                 goal = batch_goals[col_ind[i]]
+#                 print("goal:{}".format(goal))
+#                 current_pos = batch_observations[i, :2]
+#                 print("current pos:{}".format(current_pos))
+#                 current_rot = batch_observations[i, 2]
+#                 action = goal - current_pos
+
+#                 # Normalize the action to ensure it's within the max speed limit
+#                 norm = torch.norm(action)
+#                 if norm > max_speed:
+#                     action = action / norm * max_speed
+
+#                 # Calculate the required rotation to face the target
+#                 target_angle = torch.atan2(action[1], action[0])
+#                 rotation_force = target_angle - current_rot
+#                 rotation_force = (rotation_force + torch.pi) % (2 * torch.pi) - torch.pi  # Normalize to [-pi, pi]
+
+#                 # Clip the rotation force to the maximum rotation
+#                 if rotation_force > max_rotation:
+#                     rotation_force = max_rotation
+#                 elif rotation_force < -max_rotation:
+#                     rotation_force = -max_rotation
+
+#                 actions[b, i, :2] = action
+#                 actions[b, i, 2] = rotation_force
+
+#         return actions
+
+
+#         # control = self.get_action(goal_pos, curr_pos=agent_pos, curr_vel=agent_vel)
+#         control *= self.speed * u_range
+#         return torch.clamp(control, -u_range, u_range)
 
 
 if __name__ == "__main__":
+
+
+
+
     render_interactively(
         __file__,
         control_two_agents=True,
