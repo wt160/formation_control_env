@@ -553,6 +553,7 @@ class Entity(TorchVectorizedObject, Observable, ABC):
         angular_friction: float = None,
         gravity: typing.Union[float, Tensor] = None,
         collision_filter: Callable[[Entity], bool] = lambda _: True,
+        renderable: bool=True,
     ):
         if shape is None:
             shape = Sphere()
@@ -589,6 +590,7 @@ class Entity(TorchVectorizedObject, Observable, ABC):
         # friction
         self._linear_friction = linear_friction
         self._angular_friction = angular_friction
+        self.renderable = renderable
         # gravity
         if isinstance(gravity, Tensor):
             self._gravity = gravity
@@ -766,7 +768,8 @@ class Entity(TorchVectorizedObject, Observable, ABC):
 
     def render(self, env_index: int = 0) -> "List[Geom]":
         from vmas.simulator import rendering
-
+        if self.renderable == False:
+            return []
         if not self.is_rendering[env_index]:
             return []
         geom = self.shape.get_geometry()
@@ -1436,7 +1439,9 @@ class World(TorchVectorizedObject):
             dist = self.get_distance_from_point(box, sphere.state.pos, env_index)
             return_value = dist - sphere.shape.radius
             is_overlapping = self.is_overlapping(entity_a, entity_b)
-            return_value[is_overlapping] = -return_value[is_overlapping]
+            # return_value[is_overlapping] = -return_value[is_overlapping]
+            return_value[is_overlapping] = 0
+
         elif (
             isinstance(entity_a.shape, Line)
             and isinstance(entity_b.shape, Sphere)

@@ -29,7 +29,7 @@ env_1:
   scenario_name: "formation_control"
   scenario:
     n_agents: 4
-    init_position_noise_level: 0.1
+    init_position_noise_level: 0
   device: ??? # These values will be populated dynamically
   vmas_envs: ???
 
