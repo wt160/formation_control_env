@@ -21,7 +21,7 @@ from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.modules.models.multiagent import MultiAgentMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
-
+from torch.nn import TransformerEncoder, TransformerEncoderLayer, Linear, Conv1d, ConvTranspose1d
 from utils.logging import init_logging, log_evaluation, log_training, save_video
 from utils.utils import DoneTransform
 
@@ -35,7 +35,7 @@ def save_checkpoint(model, filename):
 
 
 
-@hydra.main(version_base="1.1", config_path=".", config_name="mappo_ippo_formation_control")
+@hydra.main(version_base=None, config_path=".", config_name="mappo_ippo_formation_control")
 def train(cfg: "DictConfig"):  # noqa: F821
     # Device
     log_file_path = "logfile.txt"
@@ -431,7 +431,7 @@ def train(cfg: "DictConfig"):  # noqa: F821
 
     collector_1 = SyncDataCollector(
         env_1,
-        policy,
+        gnn_policy,
         device=cfg.env.device,
         storing_device=cfg.train.device,
         frames_per_batch=cfg.collector.frames_per_batch,
@@ -549,7 +549,7 @@ def train(cfg: "DictConfig"):  # noqa: F821
 
     # Loss
     loss_module = ClipPPOLoss(
-        actor_network=policy,
+        actor_network=gnn_policy,
         critic_network=value_module,
         clip_epsilon=cfg.loss.clip_epsilon,
         entropy_coef=cfg.loss.entropy_eps,
@@ -663,7 +663,7 @@ def train(cfg: "DictConfig"):  # noqa: F821
                     env_test_list[current_env_index].frames = []
                     rollouts = env_test_list[current_env_index].rollout(
                         max_steps=cfg.env.max_steps,
-                        policy=policy,
+                        policy=gnn_policy,
                         callback=rendering_callback,
                         auto_cast_to_device=True,
                         break_when_any_done=False,
@@ -671,7 +671,7 @@ def train(cfg: "DictConfig"):  # noqa: F821
                     )
                     print("rollouts:{}".format(rollouts))
                     evaluation_time = time.time() - evaluation_start
-                    save_checkpoint(policy, "test_policy_{}.pth".format(i))
+                    save_checkpoint(gnn_policy, "test_policy_{}.pth".format(i))
                     step_onto_next_level = log_evaluation(logger, rollouts, env_test_list[current_env_index], evaluation_time, step=i)
                     if step_onto_next_level:
                         step_onto_next_level_count += 1
@@ -741,21 +741,43 @@ def batch_from_dense_to_ptg(x, fov=0.35 * torch.pi, max_distance=10.0):
     
     return batch
 
-class GINPolicyNetwork(torch.nn.Module):
-    def __init__(self, hidden_dim, output_dim, num_layers, nhead, lidar_dim=20, processed_lidar_dim=20):
-        super(GINPolicyNetwork, self).__init__()
 
-        # LiDAR preprocessing layers
-        self.lidar_fc = torch.nn.Sequential(
-            torch.nn.Linear(lidar_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, processed_lidar_dim),  # Ensure the final output dimension matches processed_lidar_dim
-            torch.nn.ReLU()
+class MLP_Autoencoder(torch.nn.Module):
+    def __init__(self, lidar_dim=20, hidden_dim=64, latent_dim=10):
+        super(MLP_Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(lidar_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim)
         )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, lidar_dim)
+        )
+
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded, encoded
+
+class GINPolicyNetwork(torch.nn.Module):
+    def __init__(self, hidden_dim=64, output_dim=2, num_layers=2, nhead=2, lidar_dim=20, latent_dim=10, extra_feature_dim = 8):
+        super(GINPolicyNetwork, self).__init__()
+        self.autoencoder = MLP_Autoencoder(lidar_dim, hidden_dim, latent_dim)
+        self.extra_feature_dim = extra_feature_dim
+        
+        # LiDAR preprocessing layers
+        # self.lidar_fc = torch.nn.Sequential(
+        #     torch.nn.Linear(lidar_dim, hidden_dim),
+        #     torch.nn.ReLU(),
+        #     torch.nn.Linear(hidden_dim, processed_lidar_dim),  # Ensure the final output dimension matches processed_lidar_dim
+        #     torch.nn.ReLU()
+        # )
 
         # Define GINConv layers
         nn1 = torch.nn.Sequential(
-            torch.nn.Linear(processed_lidar_dim + 18, hidden_dim),  # Adjust input_dim to include preprocessed LiDAR features
+            torch.nn.Linear(latent_dim + self.extra_feature_dim, hidden_dim),  # Adjust input_dim to include preprocessed LiDAR features
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim)
         )
@@ -781,13 +803,18 @@ class GINPolicyNetwork(torch.nn.Module):
 
         batch_size, num_agents, feature_length = data.shape
         # Separate original features and LiDAR data
-        original_features, lidar_data = data[:, :, :18], data[:, :, 18:]
+        original_features, lidar_data = data[:, :, :self.extra_feature_dim], data[:, :, self.extra_feature_dim:]
+
+        lidar_data = lidar_data.view(batch_size * num_agents, -1)  # Flatten for MLP
+        reconstructed_lidar, encoded_lidar = self.autoencoder(lidar_data)
+        encoded_lidar = encoded_lidar.view(batch_size, num_agents, -1)
+
+        # Concatenate original features with encoded LiDAR features
+        node_features = torch.cat([original_features, encoded_lidar], dim=-1)
+
 
         # Preprocess LiDAR data
-        lidar_features = self.lidar_fc(lidar_data)
 
-        # Concatenate original features with preprocessed LiDAR features
-        node_features = torch.cat([original_features, lidar_features], dim=-1)
         # print(f"Node features shape: {node_features.shape}")  # Debug print
 
         # Convert dense tensor data to graph batch for the entire batch
@@ -823,7 +850,9 @@ class GINPolicyNetwork(torch.nn.Module):
         out = self.fc(x)  # Each node's hidden representation is passed through the fully connected layer
         # print("policy out:{}".format(out))
         # print("policy out shape:{}".format(out.shape))
+        # return out, reconstructed_lidar
         return out
+
 
 
 @hydra.main(version_base="1.1", config_path=".", config_name="mappo_ippo")
