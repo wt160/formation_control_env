@@ -1023,6 +1023,24 @@ class Scenario(BaseScenario):
             #             self.formation_goals_landmark[idx].set_pos(torch.tensor([self.success_reconfigure_goals[idx][0] + self.t_since_success_reconfigure / 30*0.5, self.success_reconfigure_goals[idx][1]], device=self.world.device), batch_index = None)
 
 
+    def get_formation_surrounding_obstacles(self, dim_index, optim_init_value):
+        surrounding_obstacles = []
+        tolerance = 0.01
+        for agent_index in range(optim_init_value.shape[0]):
+            # Get the nearby obstacles for each agent
+            near_obstacles = self.obstacle_manager_list[dim_index].get_near_obstacles(optim_init_value[agent_index, :], 1)
+            
+            for obstacle in near_obstacles:
+                # Check if this obstacle is already in the surrounding_obstacles list
+                obstacle_coordinates = obstacle[:2]  # Assuming the first two dimensions are coordinates
+                
+                # Check for overlap; you might want to use a tolerance here
+                if not any(np.linalg.norm(obstacle_coordinates - obs[:2]) < tolerance for obs in surrounding_obstacles):
+                    surrounding_obstacles.append(obstacle)
+        
+        return surrounding_obstacles
+
+
     def get_leader_forward_obstacles(self):
         forward_obstacles = []
         
@@ -1295,15 +1313,17 @@ class Scenario(BaseScenario):
         
         for dim_index in range(self.world.batch_dim):        
             optim_init_value = optim_init_value_list[dim_index]
-                                                                                            
+            init_fixed_optim_value = optim_init_value.clone()                                                            
             has_found_valid_positions = False
+            surrounding_obstacles = self.get_formation_surrounding_obstacles(dim_index, optim_init_value)
             while has_found_valid_positions == False:         
 
+                
                 optimizer = optim.Adam([optim_init_value], lr=0.3)
                 for i in range(20):
                     optim_cycle_start = time.time()
                     optimizer.zero_grad()
-                    loss = self.objective_function(optim_init_value, initial_positions_with_center, orientations, cost_map_tensor)
+                    loss = self.objective_function(optim_init_value, init_fixed_optim_value, orientations, surrounding_obstacles)
                     loss.backward()
                     optimizer.step()
 
