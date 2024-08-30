@@ -315,7 +315,9 @@ class Scenario(BaseScenario):
         self.keep_track_time = torch.zeros(batch_dim, device=device)
         self.update_formation_assignment_time = torch.zeros(batch_dim, device=device)
         self.current_assignments = None
-
+        self.FOV_min = -0.45 * torch.pi
+        self.FOV_max = 0.45 * torch.pi
+        self.observe_D = 0.4
         return world
 
     def create_obstacles(self, obstacle_pattern, world: World):
@@ -1028,7 +1030,7 @@ class Scenario(BaseScenario):
         tolerance = 0.01
         for agent_index in range(optim_init_value.shape[0]):
             # Get the nearby obstacles for each agent
-            near_obstacles = self.obstacle_manager_list[dim_index].get_near_obstacles(optim_init_value[agent_index, :], 1)
+            near_obstacles = self.obstacle_manager_list[dim_index].get_near_obstacles(optim_init_value[agent_index, :2], 1)
             
             for obstacle in near_obstacles:
                 # Check if this obstacle is already in the surrounding_obstacles list
@@ -1306,6 +1308,33 @@ class Scenario(BaseScenario):
         # actions.append(agent_action)
     
         # return actions
+
+    def check_conditions(self, init_pos, surrounding_obstacles):
+        positions = positions.detach().cpu().numpy()
+        # Check for collision-free condition
+        for pos in positions:
+            if check_collisions(pos, cost_map, 0.1):
+                return False
+
+        # Check for minimal distance between robots
+        num_robots = len(positions)
+        for i in range(num_robots):
+            for j in range(i + 1, num_robots):
+                if distance(torch.tensor(positions[i]), torch.tensor(positions[j])) < d2:
+                    return False
+
+        
+        mst_edges, edge_weights = self.form_mst_tensor(torch.tensor(positions), torch.tensor(orientations), D, self.FOV_min, self.FOV_max)
+        
+        for (u, v), weight in zip(mst_edges, edge_weights):
+            pos_u = torch.tensor(positions[u])
+            pos_v = torch.tensor(positions[v])
+            orientation_u = torch.tensor(orientations[u])
+            orientation_v = torch.tensor(orientations[v])
+            if not self.is_observable(pos_u, pos_v, orientation_u) and not self.is_observable(pos_v, pos_u, orientation_v):
+                return False
+        return True
+    
     def optimization_process(self, optim_init_value_list):
         
         global robot_poses, cost_map, map_origin, resolution, optimizer, enhanced_cost_map
@@ -1313,6 +1342,20 @@ class Scenario(BaseScenario):
         
         for dim_index in range(self.world.batch_dim):        
             optim_init_value = optim_init_value_list[dim_index]
+            self.leader_robot.state.pos[dim_index, :]
+            self.leader_robot.state.rot[dim_index, :]
+
+            leader_pos = self.leader_robot.state.pos[dim_index, :].squeeze()  # Shape: [2]
+            leader_rot = self.leader_robot.state.rot[dim_index, :].squeeze()  # Shape: [1]
+    
+            # Combine leader's position and rotation into a [3] tensor
+            # leader_state = torch.cat((leader_pos, leader_rot), dim=-1)  # Shape: [3]
+    
+            # Add leader's state at the beginning of optim_init_value to form optim_init_value_with_leader
+            # optim_init_value_with_leader = torch.cat((leader_state.unsqueeze(0), optim_init_value), dim=0)  # Shape: [agent_num + 1, 3]
+            # print("optim_init_value_with_leader shape:{}".format(optim_init_value_with_leader.shape))
+
+
             init_fixed_optim_value = optim_init_value.clone()                                                            
             has_found_valid_positions = False
             surrounding_obstacles = self.get_formation_surrounding_obstacles(dim_index, optim_init_value)
@@ -1323,63 +1366,89 @@ class Scenario(BaseScenario):
                 for i in range(20):
                     optim_cycle_start = time.time()
                     optimizer.zero_grad()
-                    loss = self.objective_function(optim_init_value, init_fixed_optim_value, orientations, surrounding_obstacles)
+                    loss = self.objective_function(optim_init_value, init_fixed_optim_value, leader_pos, surrounding_obstacles)
                     loss.backward()
                     optimizer.step()
 
-                    if self.check_conditions(target_positions, orientations, enhanced_cost_map, d1, d2, D, FOV_min, FOV_max, x_map, y_map):
+                    if self.check_conditions(optim_init_value, surrounding_obstacles):
                         print("**************************************************************************************")
-                        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!success!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!success!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
                         print("**************************************************************************************")
                         has_found_valid_positions = True
                         break
                     print("optim cycle time:{}".format(time.time() - optim_cycle_start))
-                sample_try_num += 1
 
-            optimized_positions = target_positions.detach().numpy()
+            optimized_positions = optim_init_value.detach().numpy()
             print("optim time:{}".format(time.time() - start_time))
             initial_positions = initial_positions.detach()
             for i in range(initial_positions.size(0)):
                 initial_positions[i, 0] -= np.cos(yaw) * 8
                 initial_positions[i, 1] -= np.sin(yaw) * 8
 
-    def inter_robot_distance(self, pos, d_min):
-        dists = torch.norm(pos[:, None, :] - pos[None, :, :], dim=-1)
-        penalty = torch.relu(d_min - dists).sum() / 2  # Each pair counted twice
-        return penalty
-
+    def inter_robot_distance(self, pos, leader_pos):
+        """
+        Calculate the inter-agent distance cost to penalize agents that are too close to each other,
+        including the distance between each agent and the leader robot.
+        
+        Args:
+            leader_pos (torch.Tensor): Tensor of shape [2] representing the position of the leader robot.
+            pos (torch.Tensor): Tensor of shape [agent_size, 3] representing the positions of agents.
+        
+        Returns:
+            torch.Tensor: The total inter-agent distance cost.
+        """
+        # Calculate pairwise distances between agents (considering only the first two dimensions, x and y)
+        dists = torch.norm(pos[:, :2].unsqueeze(1) - pos[:, :2].unsqueeze(0), dim=-1)  # Shape: [agent_size, agent_size]
+        
+        # Mask the diagonal by setting distances to themselves as infinity to ignore self-distances
+        dists.fill_diagonal_(float('inf'))
+        
+        # Calculate penalties only for distances below the minimum allowed distance
+        penalty = torch.relu(self.inter_robot_obs_min_dist - dists)
+        
+        # Calculate distances between each agent and the leader robot (using only x and y dimensions)
+        leader_dists = torch.norm(pos[:, :2] - leader_pos.unsqueeze(0), dim=-1)  # Shape: [agent_size]
+        
+        # Calculate penalty for distances between agents and the leader robot that are too close
+        leader_penalty = torch.relu(self.inter_robot_obs_min_dist - leader_dists)
+        
+        # Sum the penalties: inter-agent penalties (divided by 2 for double counting) and leader penalties
+        total_cost = (penalty.sum() / 2) + leader_penalty.sum()
+        
+        return total_cost
     
-    def is_observable(self, pos_i, pos_j, orientation_i, D, FOV_min, FOV_max):
+    def is_observable(self, pos_i, pos_j, orientation_i):
         dist = torch.norm(pos_i - pos_j)
-        if dist > D:
+        if dist > self.observe_D:
             return False
         direction = torch.atan2(pos_j[1] - pos_i[1], pos_j[0] - pos_i[0])
         rel_angle = direction - orientation_i
         rel_angle = torch.atan2(torch.sin(rel_angle), torch.cos(rel_angle))  # Normalize to [-pi, pi]
-        return FOV_min <= rel_angle <= FOV_max
+        return self.FOV_min <= rel_angle <= self.FOV_max
 
-    def required_rotation_to_observe(self, pos_i, pos_j, orientation_i, FOV_min, FOV_max):
+    def required_rotation_to_observe(self, pos_i, pos_j, orientation_i):
         direction = torch.atan2(pos_j[1] - pos_i[1], pos_j[0] - pos_i[0])
         rel_angle = direction - orientation_i
         rel_angle = torch.atan2(torch.sin(rel_angle), torch.cos(rel_angle))  # Normalize to [-pi, pi]
 
-        if FOV_min <= rel_angle <= FOV_max:
+        if self.FOV_min <= rel_angle <= self.FOV_max:
             return torch.tensor(0.0, device=pos_i.device)
 
-        rotation_needed = torch.min(torch.abs(rel_angle - FOV_min), torch.abs(FOV_max - rel_angle))
+        rotation_needed = torch.min(torch.abs(rel_angle - self.FOV_min), torch.abs(self.FOV_max - rel_angle))
         return rotation_needed
-
-    def form_mst_tensor(self, positions, orientations, D, FOV_min, FOV_max):
-        num_robots = len(positions)
+    
+    def distance(self, pos_i, pos_j):
+        return torch.norm(pos_i - pos_j)
+    
+    def form_mst_tensor(self, positions, orientations):
+        num_robots = positions.shape[0]
         edges = []
         edge_weights = []
-        # print("positions:{}".format(positions))
-        # print("orientations:{}".format(orientations))
         for i in range(num_robots):
             for j in range(i + 1, num_robots):
-                weight = self.distance(positions[i], positions[j])
-                rotation_i = self.required_rotation_to_observe(positions[i], positions[j], orientations[i], FOV_min, FOV_max)
-                rotation_j = self.required_rotation_to_observe(positions[j], positions[i], orientations[j], FOV_min, FOV_max)
+                weight = self.distance(positions[i, :], positions[j, :])
+                rotation_i = self.required_rotation_to_observe(positions[i, :], positions[j, :], orientations[i])
+                rotation_j = self.required_rotation_to_observe(positions[j, :], positions[i, :], orientations[j])
                 total_rotation = torch.min(rotation_i, rotation_j)
                 edges.append((i, j))
                 edge_weights.append(weight + total_rotation)
@@ -1416,22 +1485,92 @@ class Scenario(BaseScenario):
 
         return mst_edges, mst_weights
 
-    def mst_cost(self, positions, orientations, D, FOV_min, FOV_max):
-        mst_edges, edge_weights = self.form_mst_tensor(positions, orientations, D, FOV_min, FOV_max)
-        total_cost = torch.tensor(0.0, device=positions.device, requires_grad=True)
+    def mst_cost(self, pos, leader_pos):
+        """
+        Calculate the cost of the minimum spanning tree (MST) among the positions of agents,
+        including the connection to the leader robot's position.
+        
+        Args:
+            pos (torch.Tensor): Tensor of shape [agent_size, 3] representing the positions of agents.
+            leader_pos (torch.Tensor): Tensor of shape [2] representing the position of the leader robot.
+        
+        Returns:
+            torch.Tensor: The total MST cost, including penalties for unobservable connections.
+        """
+        # Form the MST among the agent positions using the existing function
+        positions = pos[:,:2]
+        orientations = pos[:, 2]
+        mst_edges, edge_weights = self.form_mst_tensor(positions, orientations)
+        
+        # Find the closest agent position to the leader position
+        leader_dists = torch.norm(pos[:, :2] - leader_pos.unsqueeze(0), dim=-1)  # Shape: [agent_size]
+        closest_agent_idx = torch.argmin(leader_dists)  # Index of the closest agent to the leader
+        
+        # Connect the closest agent to the leader and calculate the distance
+        leader_connection_cost = leader_dists[closest_agent_idx]
+        
+        # Initialize total MST cost
+        total_cost = torch.tensor(0.0, device=pos.device, requires_grad=True)
+        
+        # Add MST edges and penalties for unobservable connections
         for (u, v), weight in zip(mst_edges, edge_weights):
-            if not self.is_observable(positions[u], positions[v], orientations[u], D, FOV_min, FOV_max):
+            if not self.is_observable(pos[u, :2], pos[v, :2], pos[u, 2]):
                 total_cost = total_cost + weight
+        
+        # Add the cost of connecting the leader to the MST via the closest agent
+        if not self.is_observable(pos[closest_agent_idx, :2], leader_pos, pos[closest_agent_idx, 2]):
+            total_cost = total_cost + leader_connection_cost
+        
         return total_cost
-    
-    def objective_function(self, pos, initial_positions, orientations, cost_map, d1, d2, D, FOV_min, FOV_max):
-        positions = pos.reshape(-1, 2)  # Reshape to get positions with shape (4, 2)
-        # change_cost = torch.norm(initial_positions - positions).sum()
-        collision_cost_value = collision_cost(positions, cost_map)
-        inter_robot_distance_penalty = inter_robot_distance(positions, d2)
-        observation_graph_cost = mst_cost(positions, orientations, D, FOV_min, FOV_max)
 
-        total_cost =   collision_cost_value + inter_robot_distance_penalty
+    
+
+    def collision_cost(self, pos, obstacles):
+        """
+        Calculate a differentiable collision cost for agents based on their proximity to obstacles.
+        
+        Args:
+            pos (torch.Tensor): Tensor of shape [agent_size, 3] representing agent positions.
+            obstacles (list of torch.Tensor): List of tensors, each of shape [3], representing obstacle positions.
+        
+        Returns:
+            torch.Tensor: The total collision cost.
+        """
+        # Convert the list of obstacle tensors to a single tensor of shape [num_obstacles, 3]
+        if obstacles:
+            obstacles_tensor = torch.stack(obstacles)  # Convert list to tensor
+        else:
+            # If no obstacles, return a zero cost
+            return torch.tensor(0.0, device=pos.device, requires_grad=True)
+        
+        # Define a small value to avoid division by zero or extremely high costs
+        epsilon = 1e-6
+        
+        # Calculate the pairwise Euclidean distances between each agent and each obstacle
+        # pos[:, :2] is of shape [agent_size, 2]
+        # obstacles_tensor[:, :2] is of shape [num_obstacles, 2]
+        # This operation will result in a [agent_size, num_obstacles] tensor of distances
+        distances = torch.cdist(pos[:, :2], obstacles_tensor[:, :2], p=2)  # Using p=2 for Euclidean distance
+
+        # Calculate the inverse of distances to get the cost; add epsilon to avoid division by zero
+        inverse_distances = 1.0 / (distances + epsilon)
+
+        # Sum the inverse distances to get the total collision cost
+        cost = torch.sum(inverse_distances)
+
+        return cost
+
+
+    def objective_function(self, pos, initial_pos, leader_pos, obstacles):
+        print("pos shape:{}".format(pos.shape))
+        print("obstacle num:{}".format(len(obstacles)))
+        change_cost = torch.norm(initial_pos - pos).sum()
+        collision_cost_value = self.collision_cost(pos, obstacles)
+        inter_robot_distance_penalty = self.inter_robot_distance(pos, leader_pos)
+        observation_graph_cost = self.mst_cost(pos, leader_pos )
+
+        total_cost =  change_cost +  collision_cost_value + inter_robot_distance_penalty + observation_graph_cost
+        # total_cost = 0
         return total_cost
 
     def initialize_maps(self, num_agents, grid_size=100):
