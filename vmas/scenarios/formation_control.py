@@ -115,7 +115,9 @@ class Scenario(BaseScenario):
         self.formation_normal_width = 0.0
         self.inter_robot_min_dist = 0.2
         self.inter_robot_obs_min_dist = 0.2
-
+        self.current_step_reset = False
+        self.last_optimized_formation_poses = []
+        self.last_opening_width = None
         # assert 1 <= self.agents_with_same_goal <= self.n_agents
         # if self.agents_with_same_goal > 1:
             # assert (
@@ -325,7 +327,7 @@ class Scenario(BaseScenario):
 
         if obstacle_pattern == 0:
             #random located obstalces
-            self.n_boxes = 20
+            self.n_boxes = 40
             self.box_width = 0.1
             for i in range(self.n_boxes):
                 obs = Landmark(
@@ -831,13 +833,13 @@ class Scenario(BaseScenario):
                     # Update the robot's position and orientation
                     # self.formation_center.state.pos[dim, :] = tentative_next_pos
                     # self.formation_center.state.rot[dim] = current_direction  # Assuming no orientation change for simplicity
-                    if tentative_next_pos[0] > self.world_semidim - 1 or tentative_next_pos[0] < -self.world_semidim + 1 or tentative_next_pos[1] > self.world_semidim - 1 or tentative_next_pos[1] < -self.world_semidim +1:
+                    if tentative_next_pos[0] > self.world_semidim - 1.1 or tentative_next_pos[0] < -self.world_semidim + 1.1 or tentative_next_pos[1] > self.world_semidim - 1.1 or tentative_next_pos[1] < -self.world_semidim +1.1:
                         tentative_next_pos[0] = torch.empty(1).uniform_(-self.world_semidim + 3, self.world_semidim - 3).item()
                         tentative_next_pos[1] = torch.empty(1).uniform_(-self.world_semidim + 3, self.world_semidim - 3).item()
-
+                        # input("change random positions")
                         # Generate a random direction in the range [0, 2*pi)
                         current_direction = torch.empty(1).uniform_(0, 2 * torch.pi).item()
-                        
+                        self.current_step_reset = True 
                     self.leader_robot.set_pos(
                         torch.tensor(
                             [
@@ -1045,9 +1047,12 @@ class Scenario(BaseScenario):
         
         if agent == self.world.agents[3]:
             print("before self.t:{}".format(self.t))
+            if not self.current_step_reset:
 
-            input("before optimization")
-            self.expert_policy()
+            # input("before optimization")
+                self.expert_policy()
+            else:
+                self.current_step_reset = False
             # if self.need_to_reconfigure == False:
             #     self.expert_policy()
             #     print("1")
@@ -1087,7 +1092,7 @@ class Scenario(BaseScenario):
         
         for d in range(self.world.batch_dim):
             obstacle_manager = self.obstacle_manager_list[d]
-            near_obstacles = obstacle_manager.get_near_obstacles(self.leader_robot.state.pos[d, :], 1)
+            near_obstacles = obstacle_manager.get_near_obstacles(self.leader_robot.state.pos[d, :], 1.3)
 
             self.leader_robot.state.rot[d]
             leader_direction = self.leader_robot.state.rot[d]
@@ -1187,7 +1192,7 @@ class Scenario(BaseScenario):
         # Get the leader robot's position and direction
         # leader_position = self.leader_robot.state.pos[d, :]
         # leader_direction = self.leader_robot.state.rot[d]
-
+        d = d + 0.05
         # Calculate the unit direction vector for the leader's orientation
         direction_vector = torch.tensor([torch.cos(leader_direction), torch.sin(leader_direction)])
         
@@ -1289,7 +1294,7 @@ class Scenario(BaseScenario):
         return scaled_goals
 
 
-    def get_optimization_init_value(self, d, d_obs, robot_radius):
+    def get_optimization_init_value(self, d, d_obs, robot_radius, last_optimized_poses):
         opening_widths = self.calculate_forward_opening_width()
         optim_init_value_list = []
         for dim_index in range(self.world.batch_dim):
@@ -1302,35 +1307,41 @@ class Scenario(BaseScenario):
                 print("original formation value")
                 optim_init_value = self.get_original_formation_goals(dim_index)  # Assuming this method returns the current formation
             else:
-                formation_minimal_through_width = self.get_formation_minimal_through_width(self.current_formation_type, len(self.world.agents), d, d_obs, robot_radius)
-                if opening_width > formation_minimal_through_width:
-                    scaled_goals = self.scale_formation_goals_to_width(dim_index, opening_width)
-                    print("scaled original formation value")
-                    optim_init_value = scaled_goals                  
+                if self.last_opening_width is not None and self.last_opening_width[dim_index] is not 0.0:
+                    optim_init_value = last_optimized_poses[dim_index] 
                 else:
 
-                    if opening_width > 2*robot_radius + 2*d_obs and opening_width < 4* robot_radius + d + 2* d_obs:
-                        formation_row_num = 1
-                        print("single row init value")
-                        optim_init_value = self.init_single_row_formation(dim_index, d, self.leader_robot.state.pos[dim_index,:], self.leader_robot.state.rot[dim_index])
-                    elif opening_width > 4* robot_radius + d + 2* d_obs and opening_width < 6 * robot_radius + 2 * d + 2* d_obs:
-                        formation_row_num = 2
-                        print("2 row init value")
-                        optim_init_value = self.init_two_row_formation(dim_index, d, self.leader_robot.state.pos[dim_index,:], self.leader_robot.state.rot[dim_index])
-                    elif opening_width > 6 * robot_radius + 2 * d + 2* d_obs:
-                        formation_row_num = 3
-                        print("3 row init value")
-                        optim_init_value = self.init_three_row_formation(dim_index, d, self.leader_robot.state.pos[dim_index,:], self.leader_robot.state.rot[dim_index])
+                    formation_minimal_through_width = self.get_formation_minimal_through_width(self.current_formation_type, len(self.world.agents), d, d_obs, robot_radius)
+                    if opening_width > formation_minimal_through_width:
+                        scaled_goals = self.scale_formation_goals_to_width(dim_index, opening_width)
+                        print("scaled original formation value")
+                        optim_init_value = scaled_goals                  
+                    else:
+
+                        if opening_width > 2*robot_radius + 2*d_obs and opening_width < 4* robot_radius + d + 2* d_obs:
+                            formation_row_num = 1
+                            print("single row init value")
+                            optim_init_value = self.init_single_row_formation(dim_index, d, self.leader_robot.state.pos[dim_index,:], self.leader_robot.state.rot[dim_index])
+                        elif opening_width > 4* robot_radius + d + 2* d_obs and opening_width < 6 * robot_radius + 2 * d + 2* d_obs:
+                            formation_row_num = 2
+                            print("2 row init value")
+                            optim_init_value = self.init_two_row_formation(dim_index, d, self.leader_robot.state.pos[dim_index,:], self.leader_robot.state.rot[dim_index])
+                        elif opening_width > 6 * robot_radius + 2 * d + 2* d_obs:
+                            formation_row_num = 3
+                            print("3 row init value")
+                            optim_init_value = self.init_three_row_formation(dim_index, d, self.leader_robot.state.pos[dim_index,:], self.leader_robot.state.rot[dim_index])
             optim_init_value_list.append(optim_init_value)
+        self.last_opening_width = copy.deepcopy(opening_widths)
         return optim_init_value_list
 
     def expert_policy(self):
         # Attempt to update formation with initial scale of 1.0
 
-        optim_init_value_list = self.get_optimization_init_value(self.inter_robot_min_dist, self.inter_robot_obs_min_dist, self.agent_radius)
+        optim_init_value_list = self.get_optimization_init_value(self.inter_robot_min_dist, self.inter_robot_obs_min_dist, self.agent_radius, self.last_optimized_formation_poses)
         print("optim_init_value_list:{}".format(optim_init_value_list))
         optimized_formation_goals_list = None
         optimized_formation_goals_list = self.optimization_process(optim_init_value_list)
+        self.last_optimized_formation_poses = []
         
         for dim_index in range(self.world.batch_dim):
             optim_init_value = optim_init_value_list[dim_index]
@@ -1338,7 +1349,7 @@ class Scenario(BaseScenario):
             # print("optim_init_value:{}".format(optim_init_value))
             for agent_index in range(len(self.world.agents)):
                 self.formation_goals_landmark[agent_index].set_pos(torch.tensor([optimized_formation_goals[agent_index,0], optimized_formation_goals[agent_index,1]], device=self.world.device), batch_index = dim_index)
-
+            self.last_optimized_formation_poses.append(optimized_formation_goals)
         # if not self.update_formation_positions(1.0):
         #     self.scale_formation_down()
         # else:
@@ -1430,8 +1441,9 @@ class Scenario(BaseScenario):
             while has_found_valid_positions == False:         
 
                 
-                optimizer = optim.Adam([optim_init_value], lr=0.3)
+                optimizer = optim.Adam([optim_init_value], lr=0.02)
                 for i in range(20):
+                    print("befre optimization value:{}".format(optim_init_value))
                     optim_cycle_start = time.time()
                     optimizer.zero_grad()
                     loss = self.objective_function(optim_init_value, init_fixed_optim_value, leader_pos, surrounding_obstacles)
@@ -1445,9 +1457,10 @@ class Scenario(BaseScenario):
                         print("**************************************************************************************")
                         has_found_valid_positions = True
                         break
+                    # input("pause between optim")
                     print("optim cycle time:{}".format(time.time() - optim_cycle_start))
 
-            optimized_positions = optim_init_value.detach().numpy()
+            optimized_positions = optim_init_value.detach()
             
             print("optim time:{}".format(time.time() - start_time))
             optimized_formation_goals.append(optimized_positions)
@@ -1477,16 +1490,16 @@ class Scenario(BaseScenario):
         dists = torch.norm(pos[:, :2].unsqueeze(1) - pos[:, :2].unsqueeze(0), dim=-1)  # Shape: [agent_size, agent_size]
         
         # Avoid in-place modification: create a new tensor for masking the diagonal
-        dists = dists + torch.eye(pos.size(0), device=pos.device) * float('inf')
+        dists = dists + torch.eye(pos.size(0), device=pos.device) * 1e6 
         
         # Apply penalty only for distances below the minimum allowed distance
-        penalty = torch.relu(self.inter_robot_obs_min_dist - dists)
+        penalty = torch.relu(self.inter_robot_min_dist - dists)
         
         # Calculate distances between each agent and the leader robot (using only x and y dimensions)
         leader_dists = torch.norm(pos[:, :2] - leader_pos.unsqueeze(0), dim=-1)  # Shape: [agent_size]
         
         # Calculate penalty for distances between agents and the leader robot that are too close
-        leader_penalty = torch.relu(self.inter_robot_obs_min_dist - leader_dists)
+        leader_penalty = torch.relu(self.inter_robot_min_dist - leader_dists)
         
         # Sum the penalties: inter-agent penalties (divided by 2 for double counting) and leader penalties
         total_cost = (penalty.sum() / 2) + leader_penalty.sum()
@@ -1677,12 +1690,17 @@ class Scenario(BaseScenario):
     def objective_function(self, pos, initial_pos, leader_pos, obstacles):
         print("pos shape:{}".format(pos.shape))
         print("obstacle num:{}".format(len(obstacles)))
+        print("pos :{}".format(pos))
+        print("leader_pos:{}".format(leader_pos))
         change_cost = torch.norm(initial_pos - pos).sum()
         collision_cost_value = self.collision_cost(pos, obstacles)
         inter_robot_distance_penalty = self.inter_robot_distance(pos, leader_pos)
         observation_graph_cost = self.mst_cost(pos, leader_pos )
-
-        total_cost =  change_cost +  collision_cost_value + inter_robot_distance_penalty + observation_graph_cost
+        print("change cost:{}".format(change_cost))
+        print("collision cost:{}".format(collision_cost_value))
+        print("inter_robot cost:{}".format(inter_robot_distance_penalty))
+        print("observation cost:{}".format(observation_graph_cost))
+        total_cost =  change_cost +  0.1*collision_cost_value + 30*inter_robot_distance_penalty + observation_graph_cost
         # total_cost = 0
         return total_cost
 
