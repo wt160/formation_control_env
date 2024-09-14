@@ -6,7 +6,7 @@ import os
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Dict, List, Sequence, Tuple, Union
-
+import copy
 import numpy as np
 import torch
 from torch import Tensor
@@ -204,6 +204,8 @@ class TorchUtils:
     def recursive_clone(value: Union[Dict[str, Tensor], Tensor]):
         if isinstance(value, Tensor):
             return value.clone()
+        elif isinstance(value, List):
+            return copy.deepcopy(value)
         else:
             return {key: TorchUtils.recursive_clone(val) for key, val in value.items()}
 
