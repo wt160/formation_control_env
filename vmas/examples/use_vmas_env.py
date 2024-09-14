@@ -31,11 +31,11 @@ def use_vmas_env(
     render: bool = False,
     save_render: bool = False,
     num_envs: int = 32,
-    n_steps: int = 200,
+    n_steps: int = 1000,
     random_action: bool = False,
     device: str = "cuda",
     scenario_name: str = "waterfall",
-    n_agents: int = 4,
+    n_agents: int = 5,
     continuous_actions: bool = True,
     visualize_render: bool = True,
 ):
@@ -88,17 +88,23 @@ def use_vmas_env(
 
         actions = {} if dict_actions else []
         for agent in env.agents:
+            # print("agent:{}".format(agent))
             if not random_action:
                 action = _get_deterministic_action(agent, continuous_actions, env)
             else:
-                action = env.get_random_action(agent)
+                # action = env.get_random_action(agent)
+                action = torch.zeros((agent.batch_dim, 3))
             if dict_actions:
                 actions.update({agent.name: action})
             else:
                 actions.append(action)
-
+        # print("actions:{}".format(actions))
         obs, rews, dones, info = env.step(actions)
+        # print("obs:{}".format(obs))
+        # print("info:{}".format(info))
 
+        # print("obs:{}".format(obs))
+        # print("info:{}".format(info))
         if render:
             frame = env.render(
                 mode="rgb_array",
@@ -211,11 +217,33 @@ def use_vmas_env_with_expert_policy(
 
 
 if __name__ == "__main__":
-    use_vmas_env_with_expert_policy(
-        scenario_name="formation_control",
-        render=True,
-        num_envs=1,
-        save_render=True,
+    # use_vmas_env_with_expert_policy(
+    #     scenario_name="formation_control",
+    #     render=True,
+    #     num_envs=1,
+    #     save_render=True,
+    #     random_action=True,
+    #     continuous_actions=True,
+    # )
+
+    use_vmas_env(
+        scenario_name="formation_control_teacher",
+        render=False,
+        num_envs=10,
+        n_steps=550,
+        save_render=False,
         random_action=True,
         continuous_actions=True,
     )
+
+
+#collect data for imitation learning
+#data includes:
+
+#input:
+# leader robot pose direction as reference frame, follower robot poses and directions in leader robot's reference frame
+#obstacles positions in the leader robot's frame, obstacles number varied. 
+
+
+#output:
+#reformated follower robot's positions and directions. 
