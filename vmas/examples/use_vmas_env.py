@@ -15,6 +15,10 @@ def get_expert_action(agent: Agent, continuous: bool, env):
     action = env.scenario.get_expert_action(agent)
     return action.clone()
 
+def get_expert_action(agent: Agent, continuous: bool, env):
+    action = env.scenario.get_expert_action(agent)
+    return action.clone()
+
 def _get_deterministic_action(agent: Agent, continuous: bool, env):
     if continuous:
         action = -agent.action.u_range_tensor.expand(env.batch_dim, agent.action_size)
