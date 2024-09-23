@@ -3,12 +3,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch_geometric.data import Data, DataLoader
 from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GINConv, global_mean_pool
 from tqdm import tqdm
 import pickle
 import numpy as np
 
 # Load the collected data
-with open('collected_data.pkl', 'rb') as f:
+with open('collected_data_10.pkl', 'rb') as f:
     collected_data = pickle.load(f)
 
 # Process the data
@@ -52,51 +53,129 @@ train_dataset = dataset[:train_size]
 val_dataset = dataset[train_size:]
 
 # Create DataLoaders
-batch_size = 32
+batch_size = 64
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-# Define the GNN Model
+
+
 # class GNNModel(nn.Module):
-#     def __init__(self, in_channels, hidden_channels, out_channels):
+#     def __init__(self, in_channels, hidden_channels, out_channels, num_agents):
 #         super(GNNModel, self).__init__()
+#         self.num_agents = num_agents
 #         self.conv1 = GCNConv(in_channels, hidden_channels)
 #         self.conv2 = GCNConv(hidden_channels, hidden_channels)
 #         self.conv3 = GCNConv(hidden_channels, hidden_channels)
 #         self.lin = nn.Linear(hidden_channels, out_channels)
     
 #     def forward(self, data):
+#         """
+#         Args:
+#             data (Batch): Batched PyG Data object containing multiple graphs.
+
+#         Returns:
+#             predicted_positions (torch.Tensor): Predicted positions for all agents in all graphs.
+#                                                Shape: [batch_size, num_agents, out_channels]
+#         """
 #         x, edge_index = data.x, data.edge_index
-#         categories = data.categories  # Node categories
-        
+
+#         # GNN Layers
 #         x = self.conv1(x, edge_index)
 #         x = torch.relu(x)
 #         x = self.conv2(x, edge_index)
 #         x = torch.relu(x)
 #         x = self.conv3(x, edge_index)
 #         x = torch.relu(x)
-        
-#         # Extract agent nodes (category == 0)
-#         agent_mask = (categories == 0)
-#         agent_embeddings = x[agent_mask]
-        
+
+#         # Extract agent node embeddings
+#         # Assumption: In each graph, the first `num_agents` nodes correspond to agents
+#         batch_size = data.num_graphs
+#         agent_embeddings = self.extract_agent_embeddings(x, data.batch, batch_size)
+
 #         # Predict positions
-#         predicted_positions = self.lin(agent_embeddings)
-        
+#         predicted_positions = self.lin(agent_embeddings)  # Shape: [batch_size * num_agents, out_channels]
+
+#         # Reshape to [batch_size, num_agents, out_channels]
+#         predicted_positions = predicted_positions.view(batch_size, self.num_agents, -1)
 #         return predicted_positions
 
-class GNNModel(nn.Module):
+#     def extract_agent_embeddings(self, x, batch, batch_size):
+#         """
+#         Extracts agent node embeddings from the batched node features.
+
+#         Args:
+#             x (torch.Tensor): Node features after GNN layers. Shape: [total_nodes, hidden_channels]
+#             batch (torch.Tensor): Batch vector, which assigns each node to a specific graph. Shape: [total_nodes]
+#             batch_size (int): Number of graphs in the batch.
+
+#         Returns:
+#             agent_embeddings (torch.Tensor): Agent embeddings for all graphs. Shape: [batch_size * num_agents, hidden_channels]
+#         """
+#         agent_node_indices = []
+#         for graph_idx in range(batch_size):
+#             # Find node indices for the current graph
+#             node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+#             # Take the first `num_agents` nodes as agent nodes
+#             agent_nodes = node_indices[:self.num_agents]
+#             agent_node_indices.append(agent_nodes)
+        
+#         # Concatenate all agent node indices
+#         agent_node_indices = torch.cat(agent_node_indices, dim=0)
+#         agent_embeddings = x[agent_node_indices]  # Shape: [batch_size * num_agents, hidden_channels]
+#         return agent_embeddings
+
+
+
+class GINModel(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_agents):
-        super(GNNModel, self).__init__()
+        super(GINModel, self).__init__()
         self.num_agents = num_agents
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
-        self.conv3 = GCNConv(hidden_channels, hidden_channels)
-        self.lin = nn.Linear(hidden_channels, out_channels)
-    
+
+        # GIN layers
+        nn1 = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, hidden_channels)
+        )
+        self.conv1 = GINConv(nn1)
+
+        nn2 = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, hidden_channels)
+        )
+        self.conv2 = GINConv(nn2)
+
+        nn3 = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, hidden_channels)
+        )
+        self.conv3 = GINConv(nn3)
+
+        # Global pooling layer
+        self.pool = global_mean_pool
+
+        # Fully connected layers
+        self.fc1 = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.ReLU(),
+            nn.Dropout(p=0.5)
+        )
+        self.fc2 = nn.Linear(hidden_channels, out_channels)
+
     def forward(self, data):
+        """
+        Args:
+            data (Batch): Batched PyG Data object containing multiple graphs.
+
+        Returns:
+            predicted_positions (torch.Tensor): Predicted positions for all agents in all graphs.
+                                               Shape: [batch_size, num_agents, out_channels]
+        """
         x, edge_index = data.x, data.edge_index
 
+        # GIN Layers
         x = self.conv1(x, edge_index)
         x = torch.relu(x)
         x = self.conv2(x, edge_index)
@@ -104,23 +183,65 @@ class GNNModel(nn.Module):
         x = self.conv3(x, edge_index)
         x = torch.relu(x)
 
-        # Since we have no categories, we need a way to extract agent node embeddings
-        # Let's assume that agent nodes are the first `num_agents` nodes
-        agent_embeddings = x[:self.num_agents]
+        # Global graph embedding
+        graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels]
 
-        # Predict positions
-        predicted_positions = self.lin(agent_embeddings)
+        # Extract agent node embeddings
+        agent_embeddings = self.extract_agent_embeddings(x, data.batch, data.num_graphs)
 
+        # Repeat graph embedding for each agent
+        graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)  # Shape: [batch_size*num_agents, hidden_channels]
+
+        # Concatenate agent embeddings with graph embeddings
+        combined = torch.cat([agent_embeddings, graph_embedding_repeated], dim=1)  # Shape: [batch_size*num_agents, 2*hidden_channels]
+
+        # Fully connected layers
+        combined = self.fc1(combined)
+        combined = torch.relu(combined)
+        predicted_positions = self.fc2(combined)  # Shape: [batch_size*num_agents, out_channels]
+
+        # Reshape to [batch_size, num_agents, out_channels]
+        predicted_positions = predicted_positions.view(data.num_graphs, self.num_agents, -1)
         return predicted_positions
 
-num_agents = 5
+    def extract_agent_embeddings(self, x, batch, batch_size):
+        """
+        Extracts agent node embeddings from the batched node features.
+
+        Args:
+            x (torch.Tensor): Node features after GIN layers. Shape: [total_nodes, hidden_channels]
+            batch (torch.Tensor): Batch vector, which assigns each node to a specific graph. Shape: [total_nodes]
+            batch_size (int): Number of graphs in the batch.
+
+        Returns:
+            agent_embeddings (torch.Tensor): Agent embeddings for all graphs. Shape: [batch_size * num_agents, hidden_channels]
+        """
+        agent_node_indices = []
+        for graph_idx in range(batch_size):
+            # Find node indices for the current graph
+            node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+            # Take the first `num_agents` nodes as agent nodes
+            agent_nodes = node_indices[:self.num_agents]
+            agent_node_indices.append(agent_nodes)
+        
+        # Concatenate all agent node indices
+        agent_node_indices = torch.cat(agent_node_indices, dim=0)
+        agent_embeddings = x[agent_node_indices]  # Shape: [batch_size * num_agents, hidden_channels]
+        return agent_embeddings
+num_agents=5
+sample_graph = dataset[0]
+in_channels = sample_graph.x.shape[1]
+hidden_channels = 64
+out_channels = 2  # Assuming 2D positions
+
+# Initialize the model, loss function, and optimizer
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = GNNModel(in_channels=graph_data['x'].shape[1], hidden_channels=64, out_channels=2, num_agents=num_agents).to(device)
+model = GINModel(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels, num_agents=num_agents).to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Training and validation
-num_epochs = 20
+num_epochs = 2000
 best_val_loss = float('inf')
 
 for epoch in range(num_epochs):
