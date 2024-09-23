@@ -34,21 +34,39 @@ if typing.TYPE_CHECKING:
 
 class ObstacleManager:
     def __init__(self, obstacles):
-        # Assumes obstacles is a list of torch.Tensor objects of shape [2]
-        self.obstacles = obstacles
-        
-        # Convert torch.Tensors to numpy arrays for KDTree
-        self.obstacle_positions = np.array([obs.cpu().numpy() for obs in self.obstacles])
-        
-        # Build the KDTree based on the obstacles' positions
-        self.tree = KDTree(self.obstacle_positions)
-    
+        """
+        Initializes the ObstacleManager with obstacles.
+
+        Args:
+            obstacles (List[torch.Tensor]): List of obstacle positions for each batch.
+                Each element is a torch.Tensor of shape [num_obstacles, 2].
+        """
+        # Stack all obstacles into a single tensor: [batch_dim, num_obstacles, 2]
+        self.obstacles = torch.stack(obstacles).to(obstacles[0].device)  # Ensure all tensors are on the same device
+        self.device = self.obstacles.device
+
     def get_near_obstacles(self, query_pos, radius):
-        # Query the KDTree for all obstacles within the given radius
-        indices = self.tree.query_ball_point(query_pos, radius)
-        
-        # Retrieve the corresponding obstacles as torch.Tensors
-        return [self.obstacles[i] for i in indices]
+        """
+        Finds obstacles within a given radius of the query positions for all batches.
+
+        Args:
+            query_pos (torch.Tensor): Query positions, shape [batch_dim, 2].
+            radius (float): Search radius.
+
+        Returns:
+            List[torch.Tensor]: List of tensors containing obstacle positions for each batch within the radius.
+        """
+        # Expand query_pos to [batch_dim, num_obstacles, 2]
+        query_expanded = query_pos.unsqueeze(1)  # [batch_dim, 1, 2]
+        # Compute pairwise distances
+        diff = self.obstacles - query_expanded  # [batch_dim, num_obstacles, 2]
+        distances = torch.norm(diff, dim=2)  # [batch_dim, num_obstacles]
+        # Create mask for distances within the radius
+        mask = distances <= radius  # [batch_dim, num_obstacles]
+        # Apply mask to get near obstacles
+        near_obstacles = [self.obstacles[b][mask[b]] for b in range(self.obstacles.shape[0])]
+        return near_obstacles  # List of [num_near_obstacles_b, 2] tensors
+
 
 class RobotPathGenerator:
     def __init__(self):
@@ -83,6 +101,48 @@ class RobotPathGenerator:
                 path[i, 1] = path[i-1, 1]
 
         return path
+
+class AgentHistory:
+    def __init__(self, batch_dim, num_agents, history_length, device):
+        """
+        Initializes the history buffer for agents across all batch dimensions.
+
+        Args:
+            batch_dim (int): Number of parallel environments.
+            num_agents (int): Number of agents.
+            history_length (int): Number of past positions to store.
+            device (torch.device): Device to store the history tensors.
+        """
+        self.batch_dim = batch_dim
+        self.num_agents = num_agents
+        self.history_length = history_length
+        self.device = device
+        # Initialize history buffer with zeros
+        # Shape: [batch_dim, num_agents, history_length, 2]
+        self.history = torch.zeros((batch_dim, num_agents, history_length, 2), device=self.device)
+
+    def update(self, current_positions):
+        """
+        Updates the history buffer with current positions.
+
+        Args:
+            current_positions (torch.Tensor): Current positions, shape [batch_dim, num_agents, 2].
+        """
+        if current_positions.shape != (self.batch_dim, self.num_agents, 2):
+            raise ValueError(f"Expected current_positions shape {(self.batch_dim, self.num_agents, 2)}, "
+                             f"but got {current_positions.shape}")
+        # Shift history to the left (remove oldest) and append new positions at the end
+        self.history[:, :, :-1, :] = self.history[:, :, 1:, :]
+        self.history[:, :, -1, :] = current_positions
+
+    def get_previous_positions(self):
+        """
+        Retrieves the previous positions for each agent across all batches.
+
+        Returns:
+            torch.Tensor: Previous positions, shape [batch_dim, num_agents, history_length, 2].
+        """
+        return self.history.clone()
 
 class Scenario(BaseScenario):
     def make_world(self, batch_dim: int, device: torch.device, **kwargs):
@@ -323,6 +383,13 @@ class Scenario(BaseScenario):
         self.FOV_max = 0.45 * torch.pi
         self.observe_D = 0.6
         self.last_policy_output = None
+        history_length = 5  # Example: store last 5 positions
+        self.agent_history = AgentHistory(
+            batch_dim=batch_dim,
+            num_agents=self.n_agents,
+            history_length=history_length,
+            device=device
+        )
         return world
 
     
@@ -805,10 +872,20 @@ class Scenario(BaseScenario):
             i += 1
 
         # Create obstacle managers for each batch
+        batch_obstacles = []
         for d in range(self.world.batch_dim):
-            single_batch_obstacles = [obs.state.pos[d,:].squeeze() for obs in self.obstacles]
-            manager = ObstacleManager(single_batch_obstacles)
-            self.obstacle_manager_list.append(manager)
+            # Extract obstacles for batch d
+            single_batch_obstacles = [obs.state.pos[d, :].squeeze() for obs in self.obstacles]
+            batch_obstacles.append(torch.stack(single_batch_obstacles))  # [num_obstacles, 2]
+
+        # Initialize a single ObstacleManager with all batch obstacles
+        self.obstacle_manager = ObstacleManager(batch_obstacles)
+
+
+        # for d in range(self.world.batch_dim):
+        #     single_batch_obstacles = [obs.state.pos[d,:].squeeze() for obs in self.obstacles]
+        #     manager = ObstacleManager(single_batch_obstacles)
+        #     self.obstacle_manager_list.append(manager)
  
 
     def reset_world_at(self, env_index: int = None):
@@ -949,102 +1026,273 @@ class Scenario(BaseScenario):
         self.spawn_obstacles(self.obstacle_pattern, env_index)
         self.t = 0
 
-    def find_clear_direction(self, current_pos, current_direction, obstacle_manager, max_scan_angle, scan_step, dim):
+
+    def find_clear_direction(self, current_pos, current_direction, max_scan_angle, scan_step):
         """
-        Find a clear direction to move in, starting from the current_direction.
+        Find a clear direction to move in for all batches, starting from the current_direction.
         Scans left and right up to max_scan_angle, in increments of scan_step.
+
+        Args:
+            current_pos (torch.Tensor): Current positions, shape [batch_dim, 2].
+            current_direction (torch.Tensor): Current directions (radians), shape [batch_dim].
+            max_scan_angle (float): Maximum scanning angle (radians).
+            scan_step (float): Scanning step (radians).
+
+        Returns:
+            torch.Tensor: New directions for each batch, shape [batch_dim].
         """
-        # First, check the forward direction
-        if self.is_direction_clear(current_pos, current_direction, obstacle_manager, dim):
-            return current_direction
+        batch_dim = current_pos.size(0)
+        device = current_pos.device  # Ensure all tensors are on the same device
 
-        # Initialize variables
-        angles_to_check = []
-        for delta_angle in np.arange(scan_step, max_scan_angle + scan_step, scan_step):
-            angles_to_check.append(current_direction + delta_angle)  # Left side
-            angles_to_check.append(current_direction - delta_angle)  # Right side
+        # Initialize scan angles: [num_steps]
+        num_steps = int(np.ceil(max_scan_angle / scan_step))
+        scan_angles = torch.arange(1, num_steps + 1, device=device).float() * scan_step  # [num_steps]
 
-        # Check each angle
-        for angle in angles_to_check:
-            if self.is_direction_clear(current_pos, angle, obstacle_manager, dim):
-                return angle
+        # Generate scan directions for left and right
+        left_angles = current_direction.unsqueeze(1) + scan_angles.unsqueeze(0)  # [batch_dim, num_steps]
+        right_angles = current_direction.unsqueeze(1) - scan_angles.unsqueeze(0)  # [batch_dim, num_steps]
 
-        # If no clear direction found, return current_direction
-        return current_direction
+        # Combine left and right angles interleaved
+        # Example: [left1, right1, left2, right2, ...]
+        scan_directions = torch.stack([left_angles, right_angles], dim=2).reshape(batch_dim, -1)  # [batch_dim, 2*num_steps]
 
-    def is_direction_clear(self, current_pos, direction, obstacle_manager, dim):
+        # Include the current direction as the first direction to check
+        scan_directions = torch.cat([current_direction, scan_directions], dim=1)  # [batch_dim, 1 + 2*num_steps]
+
+        # Check which directions are clear
+        # Assuming self.is_direction_clear can handle batched inputs
+        # Inputs: positions [batch_dim, 2], directions [batch_dim, num_directions]
+        clear_mask = self.is_direction_clear(current_pos, scan_directions)  # [batch_dim, num_directions]
+
+        # Find the first clear direction for each batch
+        # If no clear direction found, default to current_direction
+        first_clear_indices = clear_mask.float().argmax(dim=1)  # [batch_dim]
+        # If no clear direction, argmax will return 0 which corresponds to current_direction
+
+        # Create a mask to check if any direction is clear beyond the current direction
+        any_clear = clear_mask.any(dim=1)  # [batch_dim]
+
+        # Create batch indices for advanced indexing
+        batch_indices = torch.arange(batch_dim, device=device)
+
+        # Select the first clear direction for each batch
+        selected_directions = scan_directions[batch_indices, first_clear_indices]  # [batch_dim]
+        # print("selected_directions shape:{}".format(selected_directions.shape))
+        # Where any_clear is False, retain the current_direction
+        new_direction = torch.where(any_clear, selected_directions, current_direction)  # [batch_dim]
+
+        return selected_directions  # [batch_dim]
+
+
+    # def find_clear_direction(self, current_pos, current_direction, max_scan_angle, scan_step):
+    #     """
+    #     Find a clear direction to move in, starting from the current_direction.
+    #     Scans left and right up to max_scan_angle, in increments of scan_step.
+    #     """
+    #     # First, check the forward direction
+    #     if self.is_direction_clear(current_pos, current_direction):
+    #         return current_direction
+
+    #     # Initialize variables
+    #     angles_to_check = []
+    #     for delta_angle in np.arange(scan_step, max_scan_angle + scan_step, scan_step):
+    #         angles_to_check.append(current_direction + delta_angle)  # Left side
+    #         angles_to_check.append(current_direction - delta_angle)  # Right side
+
+    #     # Check each angle
+    #     for angle in angles_to_check:
+    #         if self.is_direction_clear(current_pos, angle):
+    #             return angle
+
+    #     # If no clear direction found, return current_direction
+    #     return current_direction
+    
+    def is_direction_clear(self, current_pos, scan_directions):
         """
-        Checks if the formation can move in the given direction without colliding with obstacles.
+        Checks if the formation can move in the given directions without colliding with obstacles for all batches.
+
+        Args:
+            current_pos (torch.Tensor): Current positions, shape [batch_dim, 2].
+            scan_directions (torch.Tensor): Directions to check, shape [batch_dim, num_directions].
+
+        Returns:
+            torch.BoolTensor: Boolean tensor indicating if each direction is clear, shape [batch_dim, num_directions].
         """
         scan_distance = self.scan_distance
         formation_width = self.calculate_formation_width()
-
-        # Number of points across the formation width and along the path
+        # print("current_pos shape:{}".format(current_pos.shape))
+        # print("scan_direction shape:{}".format(scan_directions.shape))
         num_checks_width = 5
-        num_checks_distance = 10  # Increase for finer resolution
-
+        num_checks_distance = 10
+        num_directions = scan_directions.shape[1]
         half_width = formation_width / 2
 
-        # Create vectors
-        direction_vector = torch.tensor([torch.cos(direction), torch.sin(direction)], device=self.device)
-        perp_direction = torch.tensor([-torch.sin(direction), torch.cos(direction)], device=self.device)
+        # Compute direction vectors
+        direction_vector = torch.stack([torch.cos(scan_directions), torch.sin(scan_directions)], dim=-1)  # [batch_dim, num_directions, 2]
+        perp_direction = torch.stack([-torch.sin(scan_directions), torch.cos(scan_directions)], dim=-1)   # [batch_dim, num_directions, 2]
+        # print("direction_vector shape:{}".format(direction_vector.shape))
+        # Compute offsets across the formation width
+        offsets = torch.linspace(-half_width, half_width, num_checks_width, device=self.device)  # [num_checks_width]
 
-        # Positions to check across the formation width
-        offsets = torch.linspace(-half_width, half_width, num_checks_width, device=self.device)
-        for offset in offsets:
-            lateral_offset = perp_direction * offset
-            # Sample along the path
-            for i in range(1, num_checks_distance + 1):
-                fraction = i / num_checks_distance
-                point = current_pos + lateral_offset + fraction * scan_distance * direction_vector
-                # Check for obstacles at this point
-                obstacles = obstacle_manager.get_near_obstacles(point.cpu().numpy(), self.agent_radius)
-                if obstacles:
-                    return False  # Path is not clear
-                # Also check bounds
-                if not self.is_within_bounds(point):
-                    return False
-        return True
+        # Initialize a mask indicating path is clear
+        path_clear = torch.ones((current_pos.shape[0], num_directions),  dtype=torch.bool, device=self.device)  # [batch_dim]
+
+        for direction_index in range(direction_vector.shape[1]):
+            for check_forward_index in range(1, num_checks_distance + 1):
+                for offset in offsets:
+                    # Compute lateral offsets
+                    lateral_offset = perp_direction[:, direction_index, :] * offset  # [batch_dim, 2]
+                    # print("lateral_offset shape:{}".format(lateral_offset.shape))
+                    # Compute fractions for scan distance
+                    check_forward_fraction = torch.tensor(check_forward_index / num_checks_distance)
+
+                    # Compute points: [batch_dim, num_directions, num_checks_distance, 2]
+                    checkpoint = current_pos + lateral_offset + check_forward_fraction * scan_distance * direction_vector[:, direction_index, :]  # [batch_dim, num_directions, num_checks_distance, 2]
+                    # print("checkpoint shape:{}".format(checkpoint.shape))
+                    # Reshape to [batch_dim * num_directions * num_checks_distance, 2]
+                    near_obstacles = self.obstacle_manager.get_near_obstacles(checkpoint, self.agent_radius)  # List of tensors
+                    
+                    # Check if any obstacles are near any points
+                    collisions = torch.tensor([len(obs) > 0 for obs in near_obstacles], device=self.device).view(current_pos.shape[0], -1)  # [batch_dim, num_directions * num_checks_distance]
+                    
+                    # If any collision in any direction, set path_clear to False
+                    collision_mask = collisions.any(dim=1)  # [batch_dim]
+                    path_clear[:, direction_index] = path_clear[:, direction_index] & (~collision_mask)
+                    
+
+                    # within_bounds = self.is_within_bounds(checkpoint).all(dim=(1, 2))  # [batch_dim, num_directions]
+                    # path_clear[:, direction_index] = path_clear[:, direction_index] & within_bounds.all(dim=1)  # [batch_dim]
+                    # Early exit if all paths are blocked
+                    # if not path_clear.any():
+                        # break
+
+        # Additionally, check if all points are within bounds
+        
+
+        return path_clear  # [batch_dim, num_directions]
+    
+    # def is_direction_clear(self, current_pos, direction, obstacle_manager, dim):
+    #     """
+    #     Checks if the formation can move in the given direction without colliding with obstacles.
+    #     """
+    #     scan_distance = self.scan_distance
+    #     formation_width = self.calculate_formation_width()
+
+    #     # Number of points across the formation width and along the path
+    #     num_checks_width = 5
+    #     num_checks_distance = 10  # Increase for finer resolution
+
+    #     half_width = formation_width / 2
+
+    #     # Create vectors
+    #     direction_vector = torch.tensor([torch.cos(direction), torch.sin(direction)], device=self.device)
+    #     perp_direction = torch.tensor([-torch.sin(direction), torch.cos(direction)], device=self.device)
+
+    #     # Positions to check across the formation width
+    #     offsets = torch.linspace(-half_width, half_width, num_checks_width, device=self.device)
+    #     for offset in offsets:
+    #         lateral_offset = perp_direction * offset
+    #         # Sample along the path
+    #         for i in range(1, num_checks_distance + 1):
+    #             fraction = i / num_checks_distance
+    #             point = current_pos + lateral_offset + fraction * scan_distance * direction_vector
+    #             # Check for obstacles at this point
+    #             obstacles = obstacle_manager.get_near_obstacles(point.cpu().numpy(), self.agent_radius)
+    #             if obstacles:
+    #                 return False  # Path is not clear
+    #             # Also check bounds
+    #             if not self.is_within_bounds(point):
+    #                 return False
+    #     return True
+
 
     def avoid_boundaries(self, tentative_next_pos, current_direction, current_pos, max_steering_angle):
-        boundary_threshold_distance = 1.1
-        repulsion_strength = 0.5
+        """
+        Adjusts the tentative next positions and directions to prevent agents from moving out of bounds.
 
-        # Compute distances to boundaries
-        dx_right = self.world_semidim - tentative_next_pos[0]
-        dx_left = tentative_next_pos[0] + self.world_semidim
-        dy_top = self.world_semidim - tentative_next_pos[1]
-        dy_bottom = tentative_next_pos[1] + self.world_semidim
+        Args:
+            tentative_next_pos (torch.Tensor): Tentative positions, shape [batch_dim, 2].
+            current_direction (torch.Tensor): Current directions (radians), shape [batch_dim].
+            current_pos (torch.Tensor): Current positions, shape [batch_dim, 2].
+            max_steering_angle (float): Maximum change in direction allowed.
 
-        # Initialize repulsion vector
-        repulsion_vector = torch.zeros(2, device=self.device)
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Adjusted positions and directions.
+        """
+        # Define world boundaries (example: square from -world_semidim to +world_semidim)
+        world_semidim = self.world_semidim
+        min_bound = -world_semidim
+        max_bound = world_semidim
 
-        if dx_right < boundary_threshold_distance:
-            repulsion_vector[0] -= (boundary_threshold_distance - dx_right) * repulsion_strength
-        if dx_left < boundary_threshold_distance:
-            repulsion_vector[0] += (boundary_threshold_distance - dx_left) * repulsion_strength
-        if dy_top < boundary_threshold_distance:
-            repulsion_vector[1] -= (boundary_threshold_distance - dy_top) * repulsion_strength
-        if dy_bottom < boundary_threshold_distance:
-            repulsion_vector[1] += (boundary_threshold_distance - dy_bottom) * repulsion_strength
+        # Check for boundary violations
+        out_of_bounds_x = (tentative_next_pos[:, 0] < min_bound) | (tentative_next_pos[:, 0] > max_bound)
+        out_of_bounds_y = (tentative_next_pos[:, 1] < min_bound) | (tentative_next_pos[:, 1] > max_bound)
+        out_of_bounds = out_of_bounds_x | out_of_bounds_y  # [batch_dim]
 
-        # Adjust the direction
-        new_direction_vector = torch.tensor([torch.cos(current_direction), torch.sin(current_direction)], device=self.device) + repulsion_vector
-        new_direction_vector = new_direction_vector / torch.norm(new_direction_vector)
+        # For batches that are out of bounds, adjust directions
+        if out_of_bounds.any():
+            # Reverse the direction for out-of-bounds batches
+            adjusted_directions = current_direction.clone()
+            adjusted_directions[out_of_bounds] += torch.pi  # Reverse direction
 
-        # Compute the change in angle
-        delta_angle = torch.atan2(new_direction_vector[1], new_direction_vector[0]) - current_direction
-        delta_angle = torch.atan2(torch.sin(delta_angle), torch.cos(delta_angle))  # Normalize
+            # Normalize the angles to [-pi, pi]
+            adjusted_directions = torch.atan2(torch.sin(adjusted_directions), torch.cos(adjusted_directions))
 
-        # Limit the change in angle
-        delta_angle = torch.clamp(delta_angle, -max_steering_angle, max_steering_angle)
-        current_direction += delta_angle
+            # Clamp the steering angle
+            delta_angles = adjusted_directions - current_direction
+            delta_angles = torch.atan2(torch.sin(delta_angles), torch.cos(delta_angles))  # Normalize
+            delta_angles = torch.clamp(delta_angles, -max_steering_angle, max_steering_angle)
+            adjusted_directions = current_direction + delta_angles
 
-        # Recompute the step direction and tentative next position
-        step_direction = torch.tensor([torch.cos(current_direction), torch.sin(current_direction)], device=self.device)
-        tentative_next_pos = current_pos + step_direction * self.velocity_limit
+            # Recompute step directions
+            step_directions = torch.stack([torch.cos(adjusted_directions), torch.sin(adjusted_directions)], dim=1)  # [batch_dim, 2]
 
-        return tentative_next_pos, current_direction
+            # Recompute tentative next positions
+            tentative_next_pos = current_pos + step_directions * self.velocity_limit  # [batch_dim, 2]
+
+            return tentative_next_pos, adjusted_directions
+        else:
+            return tentative_next_pos, current_direction
+
+    # def avoid_boundaries(self, tentative_next_pos, current_direction, current_pos, max_steering_angle):
+    #     boundary_threshold_distance = 1.1
+    #     repulsion_strength = 0.5
+
+    #     # Compute distances to boundaries
+    #     dx_right = self.world_semidim - tentative_next_pos[0]
+    #     dx_left = tentative_next_pos[0] + self.world_semidim
+    #     dy_top = self.world_semidim - tentative_next_pos[1]
+    #     dy_bottom = tentative_next_pos[1] + self.world_semidim
+
+    #     # Initialize repulsion vector
+    #     repulsion_vector = torch.zeros(2, device=self.device)
+
+    #     if dx_right < boundary_threshold_distance:
+    #         repulsion_vector[0] -= (boundary_threshold_distance - dx_right) * repulsion_strength
+    #     if dx_left < boundary_threshold_distance:
+    #         repulsion_vector[0] += (boundary_threshold_distance - dx_left) * repulsion_strength
+    #     if dy_top < boundary_threshold_distance:
+    #         repulsion_vector[1] -= (boundary_threshold_distance - dy_top) * repulsion_strength
+    #     if dy_bottom < boundary_threshold_distance:
+    #         repulsion_vector[1] += (boundary_threshold_distance - dy_bottom) * repulsion_strength
+
+    #     # Adjust the direction
+    #     new_direction_vector = torch.tensor([torch.cos(current_direction), torch.sin(current_direction)], device=self.device) + repulsion_vector
+    #     new_direction_vector = new_direction_vector / torch.norm(new_direction_vector)
+
+    #     # Compute the change in angle
+    #     delta_angle = torch.atan2(new_direction_vector[1], new_direction_vector[0]) - current_direction
+    #     delta_angle = torch.atan2(torch.sin(delta_angle), torch.cos(delta_angle))  # Normalize
+
+    #     # Limit the change in angle
+    #     delta_angle = torch.clamp(delta_angle, -max_steering_angle, max_steering_angle)
+    #     current_direction += delta_angle
+
+    #     # Recompute the step direction and tentative next position
+    #     step_direction = torch.tensor([torch.cos(current_direction), torch.sin(current_direction)], device=self.device)
+    #     tentative_next_pos = current_pos + step_direction * self.velocity_limit
+
+    #     return tentative_next_pos, current_direction
 
     def calculate_formation_width(self):
         # Calculate the maximum width of the formation based on agent positions
@@ -1060,60 +1308,67 @@ class Scenario(BaseScenario):
         self.velocity_limit = 0.03  # Adjusted speed for smoother movement
         is_first = agent == self.world.agents[0]
         if is_first:
+            current_positions = torch.stack([agent.state.pos for agent in self.world.agents])  # [num_agents, batch_dim, 2]
+            current_positions = current_positions.permute(1, 0, 2)  # [batch_dim, num_agents, 2]
+            self.agent_history.update(current_positions)
             formation_movement = "random"
             if formation_movement == "random":
-                for dim in range(self.world.batch_dim):
-                    # Parameters
-                    max_scan_angle = torch.pi / 2  # Maximum scanning angle (90 degrees)
-                    scan_step = torch.pi / 18      # Scanning step (10 degrees)
-                    scan_distance = 1.5            # Distance to check ahead
-                    self.scan_distance = scan_distance
-                    self.formation_width = self.calculate_formation_width()
 
-                    current_pos = self.formation_center.state.pos[dim, :].squeeze()
-                    current_direction = self.formation_center.state.rot[dim]
+                max_scan_angle = torch.pi / 2  # Maximum scanning angle (90 degrees)
+                scan_step = torch.pi / 12    # Scanning step (10 degrees)
+                scan_distance = 1.5            # Distance to check ahead
+                self.scan_distance = scan_distance
+                self.formation_width = self.calculate_formation_width()
 
-                    obstacle_manager = self.obstacle_manager_list[dim]
+                # Retrieve leader's current positions and directions for all batches
+                leaders_pos = copy.deepcopy(self.leader_robot.state.pos)  # [batch_dim, 2]
+                leaders_rot = copy.deepcopy(self.leader_robot.state.rot)  # [batch_dim]
+                # print("process action leaders_rot shape:{}".format(leaders_rot.shape))
+                # Find clear directions for all batches
+                new_directions = self.find_clear_direction(leaders_pos, leaders_rot, max_scan_angle, scan_step)  # [batch_dim]
+                # print("new_directionsn shape:{}".format(new_directions.shape))
 
-                    # Find a clear direction
-                    new_direction = self.find_clear_direction(
-                        current_pos,
-                        current_direction,
-                        obstacle_manager,
-                        max_scan_angle,
-                        scan_step,
-                        dim
-                    )
+                # Smoothly adjust the current directions
+                max_steering_angle = 0.06  # Maximum change in direction per step
+                delta_angles = new_directions - leaders_rot.squeeze()  # [batch_dim]
+                # print("leaders_rot shape:{}".format(leaders_rot.shape))
+                # print("delta angles shape:{}".format(delta_angles.shape))
+                # Normalize the angle differences to [-pi, pi]
+                delta_angles = torch.atan2(torch.sin(delta_angles), torch.cos(delta_angles))  # [batch_dim]
+                # Clamp the delta angles to the maximum steering angle
+                delta_angles = torch.clamp(delta_angles, -max_steering_angle, max_steering_angle)  # [batch_dim]
+                # Update the directions
+                updated_directions = leaders_rot.squeeze() + delta_angles  # [batch_dim]
 
-                    # Smoothly adjust the current direction
-                    max_steering_angle = 0.06  # Maximum change in direction per step
-                    delta_angle = new_direction - current_direction
-                    delta_angle = torch.atan2(torch.sin(delta_angle), torch.cos(delta_angle))  # Normalize
-                    delta_angle = torch.clamp(delta_angle, -max_steering_angle, max_steering_angle)
-                    current_direction += delta_angle
+                # Compute step directions
+                step_directions = torch.stack([torch.cos(updated_directions), torch.sin(updated_directions)], dim=1)  # [batch_dim, 2]
+                # print("step direction shape:{}".format(step_directions.shape))
+                # Compute tentative next positions
+                tentative_next_pos = leaders_pos + step_directions * self.velocity_limit  # [batch_dim, 2]
 
-                    # Update the step direction and tentative next position
-                    step_direction = torch.tensor([torch.cos(current_direction), torch.sin(current_direction)], device=self.device)
-                    tentative_next_pos = current_pos + step_direction * self.velocity_limit
+                # Boundary avoidance for all batches
+                tentative_next_pos, updated_directions = self.avoid_boundaries(
+                    tentative_next_pos,
+                    updated_directions,
+                    leaders_pos,
+                    max_steering_angle
+                )
+                # print("update direction shape:{}".format(updated_directions.shape))
+                # print("before self.leader_robot:{}, {}".format(self.leader_robot.state.pos.shape, self.leader_robot.state.rot.shape))
 
-                    # Boundary avoidance
-                    tentative_next_pos, current_direction = self.avoid_boundaries(
-                        tentative_next_pos,
-                        current_direction,
-                        current_pos,
-                        max_steering_angle
-                    )
+                # Update leader robot positions and rotations
+                self.leader_robot.set_pos(tentative_next_pos, batch_index=None)  # Assume set_pos can handle batched inputs
+                self.leader_robot.set_rot(updated_directions.unsqueeze(dim=1), batch_index=None)
+                # print("after self.leader_robot:{}, {}".format(self.leader_robot.state.pos.shape, self.leader_robot.state.rot.shape))
+                # Update formation center positions and rotations
+                self.formation_center.set_pos(tentative_next_pos, batch_index=None)
+                self.formation_center.set_rot(updated_directions.unsqueeze(dim=1), batch_index=None)
+                self.formation_center_pos[:, :2] = tentative_next_pos  # [batch_dim, 2]
+                self.formation_center_pos[:, 2] = updated_directions # [batch_dim]
 
-                    # Update positions and rotations
-                    self.leader_robot.set_pos(tentative_next_pos, batch_index=dim)
-                    self.leader_robot.set_rot(current_direction, batch_index=dim)
-                    self.leader_agent.set_pos(tentative_next_pos, batch_index=dim)
-                    self.leader_agent.set_rot(current_direction, batch_index=dim)
-                    self.formation_center.set_pos(tentative_next_pos, batch_index=dim)
-                    self.formation_center.set_rot(current_direction, batch_index=dim)
-                    self.formation_center_pos[dim, :2] = tentative_next_pos
-                    self.formation_center_pos[dim, 2] = current_direction
-                  
+                # Optionally, update leader_agent similarly if applicable
+                self.leader_agent.set_pos(tentative_next_pos, batch_index=None)
+                self.leader_agent.set_rot(updated_directions.unsqueeze(dim=1), batch_index=None)
 
 
             elif formation_movement == "horizental":
@@ -1285,265 +1540,8 @@ class Scenario(BaseScenario):
                 # print("formation goal {}, {}".format(i, self.formation_goals_landmark[i].state.pos))
         
     
-    def compute_agent_velocity(self, agent, agent_index):
-        # Get the agent's current position (batch_size x 2)
-        current_pos = agent.state.pos  # Shape: [batch_size, 2]
-
-        # Get the agent's formation goal position
-        goal_pos = self.formation_goals[agent_index][:, :2]  # Shape: [batch_size, 2]
-
-        # Compute the goal direction vector
-        goal_direction = goal_pos - current_pos  # Shape: [batch_size, 2]
-        goal_distance = torch.norm(goal_direction, dim=1, keepdim=True)  # Shape: [batch_size, 1]
-        goal_direction_normalized = goal_direction / (goal_distance + 1e-6)  # Avoid division by zero
-
-        # Set the goal attraction strength
-        k_goal = 1.0
-
-        # Initialize the total force vector
-        total_force = k_goal * goal_direction_normalized  # Shape: [batch_size, 2]
-
-        # Initialize repulsive forces
-        repulsive_forces = torch.zeros_like(total_force)  # Shape: [batch_size, 2]
-
-        # For each batch dimension
-        batch_size = current_pos.shape[0]
-        for dim in range(batch_size):
-            # Get obstacle manager for this environment
-            obstacle_manager = self.obstacle_manager_list[dim]
-            # Get obstacles near the agent
-            obstacles = obstacle_manager.get_near_obstacles(current_pos[dim].cpu().numpy(), 1.0)  # Adjust search radius as needed
-
-            if obstacles:
-                # Convert obstacle positions to torch tensor
-                obs_positions = torch.stack(obstacles).to(self.device)  # Shape: [num_obstacles, 2]
-
-                # Compute vectors from agent to obstacles
-                obs_vectors = current_pos[dim].unsqueeze(0) - obs_positions  # Shape: [num_obstacles, 2]
-
-                # Compute distances
-                obs_distances = torch.norm(obs_vectors, dim=1, keepdim=True)  # Shape: [num_obstacles, 1]
-
-                # Avoid division by zero
-                obs_distances = torch.clamp(obs_distances, min=0.1)
-
-                # Compute repulsive forces
-                k_rep = 0.5  # Adjust repulsion strength as needed
-                influence_range = 1.0  # Obstacles within this range influence the agent
-                rep_force_magnitudes = k_rep * (1.0 / obs_distances - 1.0 / influence_range) / (obs_distances ** 2)
-                # Only consider obstacles within influence range
-                influence = (obs_distances < influence_range).float()
-                rep_force_magnitudes = rep_force_magnitudes * influence
-
-                # Compute repulsive force vectors
-                repulsive_force_vectors = (obs_vectors / obs_distances) * rep_force_magnitudes  # Shape: [num_obstacles, 2]
-
-                # Sum up repulsive forces
-                total_repulsive_force = repulsive_force_vectors.sum(dim=0)  # Shape: [2]
-
-                # Add to total force
-                repulsive_forces[dim] = total_repulsive_force
-
-        # Add repulsive forces to total force
-        total_force += repulsive_forces
-
-        # Normalize the total force to get the velocity direction
-        total_force_norm = torch.norm(total_force, dim=1, keepdim=True)
-        velocity_direction = total_force / (total_force_norm + 1e-6)
-
-        # Set the agent's speed (you can adjust the speed as needed)
-        max_speed = 0.05  # Limit speed to prevent excessive velocities
-        agent_speed = torch.clamp(goal_distance, max=max_speed)  # Shape: [batch_size, 1]
-
-        # Compute the velocity
-        velocity = velocity_direction * agent_speed
-
-        return velocity  # Shape: [batch_size, 2]
-
-    def get_formation_surrounding_obstacles(self, dim_index, optim_init_value):
-        surrounding_obstacles = []
-        tolerance = 0.01
-        for agent_index in range(optim_init_value.shape[0]):
-            # Get the nearby obstacles for each agent
-            # near_obstacles = self.obstacle_manager_list[dim_index].get_near_obstacles(optim_init_value[agent_index, :2], 1)
-            # Inside the get_formation_surrounding_obstacles method
-            near_obstacles = self.obstacle_manager_list[dim_index].get_near_obstacles(optim_init_value[agent_index, :2].detach().cpu().numpy(), 0.6)
-
-            for obstacle in near_obstacles:
-                # Check if this obstacle is already in the surrounding_obstacles list
-                obstacle_coordinates = obstacle[:2]  # Assuming the first two dimensions are coordinates
-                
-                # Check for overlap; you might want to use a tolerance here
-                if not any(np.linalg.norm(obstacle_coordinates - obs[:2]) < tolerance for obs in surrounding_obstacles):
-                    surrounding_obstacles.append(obstacle)
-        
-        return surrounding_obstacles
-
-
-
-    def get_leader_forward_obstacles_2(self):
-        paired_obstacles_list = []
-        closest_pair_list = []
-
-        for d in range(self.world.batch_dim):
-            obstacle_manager = self.obstacle_manager_list[d]
-            near_obstacles = obstacle_manager.get_near_obstacles(self.leader_robot.state.pos[d, :].cpu(), 1.2)
-
-            leader_direction = self.leader_robot.state.rot[d]
-            print("leader direction:{}".format(leader_direction))
-
-            # Define search parameters
-            angle_range = torch.tensor(torch.pi + 0.5)  # Extend 180 degrees (π) to each side for a full forward search
-            max_distance = 1.2  # Define max distance for relevant obstacles
-
-            # List to hold valid obstacles and their relative angles
-            valid_obstacles = []
-
-            # Filter obstacles within the angle range and distance range
-            for obstacle in near_obstacles:
-                # Get the relative position of the obstacle with respect to the robot
-                rel_pos = obstacle - self.leader_robot.state.pos[d, :]
-
-                # Calculate the angle to the obstacle relative to the robot's current direction
-                obstacle_angle = torch.atan2(rel_pos[1], rel_pos[0])
-
-                # Normalize the angle difference
-                angle_diff = torch.atan2(torch.sin(obstacle_angle - leader_direction), torch.cos(obstacle_angle - leader_direction))
-
-                # Calculate the distance to the obstacle
-                distance = torch.norm(rel_pos)
-
-                # Check if the obstacle is within the angle and distance range
-                if -angle_range <= angle_diff <= angle_range and distance <= max_distance:
-                    valid_obstacles.append((obstacle, angle_diff, distance))
-
-            # Sort the valid obstacles by their relative angle
-            valid_obstacles.sort(key=lambda x: x[1])
-
-            # List to hold paired obstacles for this batch
-            paired_obstacles = []
-            closest_pair = None
-            min_angle_diff = float('inf')  # Initialize with a large value to find the closest pair
-
-            # Pair obstacles that are closest to each other in terms of angle
-            for i in range(len(valid_obstacles) - 1):
-                right_obstacle = valid_obstacles[i][0]
-                left_obstacle = valid_obstacles[i + 1][0]
-
-                # Calculate the norm (Euclidean distance) between the paired obstacles
-                opening_width = torch.norm(left_obstacle[:2] - right_obstacle[:2])
-
-                # Append the paired obstacles and their opening width
-                paired_obstacles.append({
-                    'pair': (left_obstacle, right_obstacle),
-                    'opening_width': opening_width
-                })
-
-                # Check if this pair is the closest to the leader's direction
-                avg_angle_diff = (valid_obstacles[i][1] + valid_obstacles[i + 1][1]) / 2
-                if abs(avg_angle_diff) < min_angle_diff:
-                    min_angle_diff = abs(avg_angle_diff)
-                    print("valid_obstacles[i][1]:{}".format(valid_obstacles[i][1]))
-                    print("valid_obstacles[i+1][1]:{}".format(valid_obstacles[i+1][1]))
-                    # Determine whether the obstacles are on different sides
-                    if valid_obstacles[i][1] < 0 < valid_obstacles[i + 1][1]:  # On different sides
-                        # Calculate the perpendicular projection for opening width
-                        perp_direction = torch.tensor([torch.cos(leader_direction + torch.pi / 2),
-                                                    torch.sin(leader_direction + torch.pi / 2)], device=self.device)
-
-                        # Get the relative positions of the left and right obstacles with respect to the leader robot's position
-                        left_rel_pos = left_obstacle - self.leader_robot.state.pos[d, :]
-                        right_rel_pos = right_obstacle - self.leader_robot.state.pos[d, :]
-
-                        # Project the relative positions onto the perpendicular direction
-                        left_projection = torch.dot(left_rel_pos, perp_direction)
-                        right_projection = torch.dot(right_rel_pos, perp_direction)
-
-                        # Calculate the left and right openings
-                        left_opening = torch.abs(left_projection)
-                        right_opening = torch.abs(right_projection)
-
-                        closest_pair = {
-                            'pair': (left_obstacle, right_obstacle),
-                            'left_opening': left_opening,
-                            'right_opening': right_opening
-                        }
-                        break
-                    else:  # Obstacles are on the same side, one obstacle will be set to None
-                        if valid_obstacles[i][1] > 0:  # Both on the left
-                            left_obstacle = valid_obstacles[i][0]
-                            left_opening = torch.abs(torch.dot(left_obstacle - self.leader_robot.state.pos[d, :], torch.tensor([torch.cos(leader_direction + torch.pi / 2), torch.sin(leader_direction + torch.pi / 2)], device=self.device)))
-                            right_obstacle = None
-                            right_opening = torch.tensor(2.0)
-                        elif valid_obstacles[i+1][1] < 0:  # Both on the right
-                            right_obstacle = valid_obstacles[i + 1][0]
-                            right_opening = torch.abs(torch.dot(right_obstacle - self.leader_robot.state.pos[d, :], torch.tensor([torch.cos(leader_direction + torch.pi / 2), torch.sin(leader_direction + torch.pi / 2)], device=self.device)))
-                            left_obstacle = None
-                            left_opening = torch.tensor(2.0)
-
-                        closest_pair = {
-                            'pair': (left_obstacle, right_obstacle),
-                            'left_opening': left_opening,
-                            'right_opening': right_opening
-                        }
-
-            # Append the results for this batch
-            paired_obstacles_list.append(paired_obstacles)
-            closest_pair_list.append(closest_pair)
-
-        return paired_obstacles_list, closest_pair_list
     
-    def get_leader_forward_obstacles(self):
-        forward_obstacles = []
-        
-        for d in range(self.world.batch_dim):
-            obstacle_manager = self.obstacle_manager_list[d]
-            near_obstacles = obstacle_manager.get_near_obstacles(self.leader_robot.state.pos[d, :], 1.3)
 
-            self.leader_robot.state.rot[d]
-            leader_direction = self.leader_robot.state.rot[d]
-            print("leader direction:{}".format(leader_direction))
-        
-            # Define search parameters
-            angle_range = torch.tensor(torch.pi /2.0)  # Extend 60 degrees to each side
-            angles = torch.tensor([leader_direction - angle_range, leader_direction + angle_range])
-
-            # Initialize variables to store the first obstacle for each direction
-            first_obstacle_left = None
-            first_obstacle_right = None
-            min_dist_left = torch.tensor(float('inf'))
-            min_dist_right = torch.tensor(float('inf'))
-
-            # Iterate through all near obstacles to find the first one on each side
-            for obstacle in near_obstacles:
-                # Get the relative position of the obstacle with respect to the robot
-                rel_pos = obstacle - self.leader_robot.state.pos[d, :]
-                
-                # Calculate the angle to the obstacle relative to the robot's current direction
-                obstacle_angle = torch.atan2(rel_pos[1], rel_pos[0])
-
-                # Normalize the angle difference
-                angle_diff = obstacle_angle - leader_direction
-                angle_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff))  # Normalize between -π and π
-
-                # Calculate the distance to the obstacle
-                distance = torch.norm(rel_pos)
-
-                # Check if the obstacle is within the left or right search range
-                if -angle_range <= angle_diff <= 0 and distance < min_dist_right:
-                    first_obstacle_right = obstacle
-                    min_dist_right = distance
-                elif 0 < angle_diff <= angle_range and distance < min_dist_left:
-                    first_obstacle_left = obstacle
-                    min_dist_left = distance
-
-            # Append the found obstacles to the list, even if one side doesn't find any
-            forward_obstacles.append({
-                'left': first_obstacle_left,
-                'right': first_obstacle_right
-            })
-    
-        return forward_obstacles
 
 
     def get_formation_minimal_through_width(self, formation_type, follower_formation_num, d, d_obs, robot_radius):
@@ -2045,40 +2043,65 @@ class Scenario(BaseScenario):
         batch = Batch.from_data_list(data_list)
         
         return batch
+    
+    def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, previous_positions):
+        """
+        Constructs a graph with node features including current and previous positions.
 
-    def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, threshold_distance=1.0):
-        # print("nominal_formation_tensor shape:{}".format(nominal_formation_tensor.shape))
-        
-        nominal_formation_category = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [5, 1] with category 0
-        nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
-        if near_obstacles_in_leader_frame != None:
-            # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
-        
-        
-            near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
-            near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
-            num_obstacles = near_obstacles_in_leader_frame.size(0)
-        
+        Args:
+            nominal_formation_tensor (torch.Tensor): Tensor of shape [agent_num, 2] containing [x, y].
+            near_obstacles_in_leader_frame (torch.Tensor or None): Tensor of shape [num_near_obstacles, 2] or None.
+            previous_positions (torch.Tensor): Tensor of shape [agent_num, history_length, 2] containing previous positions.
 
+        Returns:
+            Data: A PyTorch Geometric Data object representing the graph.
+        """
 
-        # Add a category feature to each node (0 for nominal formation, 1 for obstacles)
-        
-        # Concatenate category feature to position tensors
-        x = None
-        # Combine all node features into a single tensor
-        if near_obstacles_in_leader_frame != None:
-            x = torch.cat((nominal_formation_tensor, near_obstacles_in_leader_frame), dim=0)  # Shape: [5 + obstacle_num, 3]
+        if near_obstacles_in_leader_frame is not None and near_obstacles_in_leader_frame.numel() != 0:
+            # Assign a category to distinguish between agents and obstacles
+            agent_categories = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [agent_num, 1]
+            obstacle_categories = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [num_obstacles, 1]
+            
+            # Concatenate positions and previous positions for agents
+            # Flatten previous_positions: [agent_num, history_length * 2]
+            history_length = previous_positions.size(1)
+            previous_positions_flat = previous_positions.view(nominal_formation_tensor.size(0), -1)  # [agent_num, history_length * 2]
+            agent_features = torch.cat([nominal_formation_tensor, previous_positions_flat], dim=1)  # [agent_num, 2 + history_length * 2]
+            
+            # For obstacles, previous positions can be set to zero or handled differently
+            # Here, we set them to zero since obstacles may be static
+            obstacle_features = torch.cat([
+                near_obstacles_in_leader_frame,  # [num_obstacles, 2]
+                torch.zeros((near_obstacles_in_leader_frame.size(0), history_length * 2), device=self.device)  # [num_obstacles, history_length * 2]
+            ], dim=1)  # [num_obstacles, 2 + history_length * 2]
+            
+            # Concatenate all node features
+            x = torch.cat([agent_features, obstacle_features], dim=0)  # [agent_num + num_obstacles, 2 + history_length * 2]
+            
+            # Assign categories as additional node features if needed
+            # For example, concatenate categories to node features
+            categories = torch.cat([agent_categories, obstacle_categories], dim=0)  # [agent_num + num_obstacles, 1]
+            x = torch.cat([x, categories], dim=1)  # [agent_num + num_obstacles, 3 + history_length * 2]
         else:
-            x = nominal_formation_tensor
-        # Initialize edge index and edge attributes
+            # Only agents, no obstacles
+            history_length = previous_positions.size(1)
+            previous_positions_flat = previous_positions.view(nominal_formation_tensor.size(0), -1)  # [agent_num, history_length * 2]
+            x = torch.cat([nominal_formation_tensor, previous_positions_flat], dim=1)  # [agent_num, 2 + history_length * 2]
+            categories = torch.zeros((x.size(0), 1), device=self.device)  # [agent_num, 1]
+            x = torch.cat([x, categories], dim=1)  # [agent_num, 3 + history_length * 2]
+
+
+        # Define edges based on your specific requirements
+        # For simplicity, let's assume a fully connected graph without self-loops
         edge_index = []
         edge_attr = []
 
         # Number of agents and obstacles
         num_agents = nominal_formation_tensor.size(0)
-        
+        threshold_distance= 0.8
         # Connect each nominal formation agent with near obstacles
         if near_obstacles_in_leader_frame != None:
+            num_obstacles = near_obstacles_in_leader_frame.size(0)
             for agent_index in range(num_agents):
                 agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
                 for obstacle_index in range(num_obstacles):
@@ -2106,6 +2129,67 @@ class Scenario(BaseScenario):
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
         
         return data
+    
+    # def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, threshold_distance=1.0):
+    #     # print("nominal_formation_tensor shape:{}".format(nominal_formation_tensor.shape))
+        
+    #     nominal_formation_category = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [5, 1] with category 0
+    #     nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
+    #     if near_obstacles_in_leader_frame != None:
+    #         # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
+        
+        
+    #         near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
+    #         near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
+    #         num_obstacles = near_obstacles_in_leader_frame.size(0)
+        
+
+
+    #     # Add a category feature to each node (0 for nominal formation, 1 for obstacles)
+        
+    #     # Concatenate category feature to position tensors
+    #     x = None
+    #     # Combine all node features into a single tensor
+    #     if near_obstacles_in_leader_frame != None:
+    #         x = torch.cat((nominal_formation_tensor, near_obstacles_in_leader_frame), dim=0)  # Shape: [5 + obstacle_num, 3]
+    #     else:
+    #         x = nominal_formation_tensor
+    #     # Initialize edge index and edge attributes
+    #     edge_index = []
+    #     edge_attr = []
+
+    #     # Number of agents and obstacles
+    #     num_agents = nominal_formation_tensor.size(0)
+        
+    #     # Connect each nominal formation agent with near obstacles
+    #     if near_obstacles_in_leader_frame != None:
+    #         for agent_index in range(num_agents):
+    #             agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
+    #             for obstacle_index in range(num_obstacles):
+    #                 obstacle_pos = near_obstacles_in_leader_frame[obstacle_index, :2]  # Get the position part
+    #                 distance = torch.norm(agent_pos - obstacle_pos)
+    #                 if distance <= threshold_distance:  # Check if within threshold distance
+    #                     # Add edges from agent to obstacle
+    #                     edge_index.append([agent_index, num_agents + obstacle_index])  # Agent to obstacle
+    #                     edge_index.append([num_agents + obstacle_index, agent_index])  # Obstacle to agent
+    #                     edge_attr.append([1])  # Edge type 1 for agent-obstacle
+                        
+    #     # Connect each pair of nominal formation agents
+    #     for i in range(num_agents):
+    #         for j in range(i + 1, num_agents):
+    #             # Add edges between agents
+    #             edge_index.append([i, j])  # Agent to agent
+    #             edge_index.append([j, i])  # Agent to agent (reverse direction)
+    #             edge_attr.append([0])  # Edge type 0 for agent-agent
+
+    #     # Convert edge index and edge attributes to tensors
+    #     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # Shape: [2, num_edges]
+    #     edge_attr = torch.tensor(edge_attr, dtype=torch.float)  # Shape: [num_edges, 1]
+
+    #     # Create the PyTorch Geometric data object
+    #     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        
+    #     return data
 
 
 
@@ -2193,7 +2277,7 @@ class Scenario(BaseScenario):
             pass
             # print("No True entries found.")
         return done_status
-
+    
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         """
         Collects and returns information for the given agent, including optimized target positions
@@ -2210,6 +2294,9 @@ class Scenario(BaseScenario):
         
         if current_agent_index == 0:
             agent_num = len(self.world.agents)
+            
+            # Initialize nominal formation tensor with positions
+            # Shape: [batch_dim, agent_num, 2] => [x, y]
             nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 2), device=self.device)
             
             # Define nominal positions for agents (assuming 5 agents)
@@ -2217,35 +2304,72 @@ class Scenario(BaseScenario):
             nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
             
             for i, nomi_agent in enumerate(self.world.agents):
+                # Assign nominal positions
                 nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
                 nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
             
+            # Retrieve previous positions from history
+            # Shape: [num_agents, history_length, 2]
+            previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
+            
+            # Transform previous positions to the leader's frame for all batches
+            # Assuming leader's rotation and position are already handled in the environment
+            leaders_pos = self.leader_robot.state.pos  # [batch_dim, 2]
+            leaders_rot = self.leader_robot.state.rot  # [batch_dim]
+            # print("self.leader_robot:{}, {}".format(self.leader_robot.state.pos.shape, self.leader_robot.state.rot.shape))
+            # print("leaders_rot shape1:{}".format(leaders_rot.shape))
+            # 
+            # For each batch dimension, transform previous positions
             for d in range(self.world.batch_dim):
-                obstacle_manager = self.obstacle_manager_list[d]
-                leader_pos = self.leader_robot.state.pos[d, :]  # Shape: [2]
-                leader_rot = self.leader_robot.state.rot[d]      # Scalar (radians)
+                # Get leader's rotation and position for this batch
+                leader_pos = leaders_pos[d, :]  # [2]
+                # print("leaders_rot shape:{}".format(leaders_rot.shape))
+                leader_rot = leaders_rot[d]      # Scalar (radians)
+                # print("leader_rot shape:{}".format(leader_rot.shape))
+                # Get nominal positions for this batch
+                nominal_positions = nominal_formation_tensor[d, :, :]  # [agent_num, 2]
                 
-                near_obstacles = obstacle_manager.get_near_obstacles(leader_pos.cpu(), 1.5)
-                # near_obstacles: list of tensors, each of shape [2]
+                # Get previous positions for all agents
+                # [agent_num, history_length, 2]
+                agent_prev_positions = previous_positions[d, :, :, :] 
+                # Transform previous positions relative to leader's frame
+                # Translation: agent_prev_positions - leader_pos
+                translated_prev_positions = agent_prev_positions - leader_pos.unsqueeze(0).unsqueeze(1)  # [agent_num, history_length, 2]
                 
-                if len(near_obstacles) != 0:
-                    near_obstacles_tensor = torch.stack(near_obstacles)  # Shape: [num_obstacles, 2]
+                # Rotation: Apply rotation matrix
+                cos_theta = torch.cos(leader_rot)
+                sin_theta = torch.sin(leader_rot)
+                # print("sin_theta shape:{}".format(sin_theta.shape))
+                rotation_matrix = torch.tensor([[cos_theta, sin_theta],
+                                                [-sin_theta, cos_theta]], device=self.device)  # [2, 2]
+                
+                # Apply rotation to each agent's previous positions
+                # Reshape for batch matrix multiplication
+                agent_prev_positions_flat = translated_prev_positions.view(-1, 2)  # [agent_num * history_length, 2]
+                transformed_prev_positions = torch.matmul(agent_prev_positions_flat, rotation_matrix)  # [agent_num * history_length, 2]
+                transformed_prev_positions = transformed_prev_positions.view(agent_num, -1, 2)  # [agent_num, history_length, 2]
+                
+                # Retrieve transformed previous positions for all agents
+                transformed_prev_positions_batch = transformed_prev_positions  # [agent_num, history_length, 2]
+                
+                # Construct graph for this batch
+                near_obstacles = self.obstacle_manager.get_near_obstacles(leaders_pos[d, :].unsqueeze(0), 1.5)[0]  # [num_near_obstacles, 2] or empty
+                
+                if near_obstacles is not None and len(near_obstacles) > 0:
+                    near_obstacles_tensor = near_obstacles  # [num_near_obstacles, 2]
                     
-                    # Translate obstacles relative to leader's position
-                    translated_obstacles = near_obstacles_tensor - leader_pos  # Shape: [num_obstacles, 2]
-                    
-                    # Rotate obstacles into leader's frame
-                    cos_theta = torch.cos(leader_rot)
-                    sin_theta = torch.sin(leader_rot)
-                    rotation_matrix = torch.tensor([[cos_theta, sin_theta],
-                                                    [-sin_theta, cos_theta]], device=self.device)  # Shape: [2, 2]
-                    
-                    # Apply rotation: (num_obstacles, 2) x (2, 2) -> (num_obstacles, 2)
-                    near_obstacles_in_leader_frame = torch.matmul(translated_obstacles, rotation_matrix)
-                    
-                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame)
+                    # Construct node features with current and previous positions
+                    current_graph = self.single_graph_from_data(
+                        nominal_formation_tensor[d, :, :],                # [agent_num, 2]
+                        near_obstacles_tensor,                             # [num_near_obstacles, 2]
+                        transformed_prev_positions_batch                   # [agent_num, history_length, 2]
+                    )
                 else:
-                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None)
+                    current_graph = self.single_graph_from_data(
+                        nominal_formation_tensor[d, :, :],                # [agent_num, 2]
+                        None,                                             # No obstacles
+                        transformed_prev_positions_batch                   # [agent_num, history_length, 2]
+                    )
                 
                 graph_list.append(current_graph)
             # End of batch_dim loop
@@ -2255,18 +2379,18 @@ class Scenario(BaseScenario):
         # ============================
 
         # Translate agent positions relative to leader's position
-        translated_agent_pos = agent.state.pos - self.leader_robot.state.pos  # Shape: [batch_dim, 2]
+        translated_agent_pos = agent.state.pos - self.leader_robot.state.pos  # [batch_dim, 2]
 
         # Rotate agent positions into leader's frame
-        # Assume self.leader_robot.state.rot is a tensor of shape [batch_dim]
-        cos_theta = torch.cos(self.leader_robot.state.rot).unsqueeze(-1)  # Shape: [batch_dim, 1]
-        sin_theta = torch.sin(self.leader_robot.state.rot).unsqueeze(-1)  # Shape: [batch_dim, 1]
+        # Assume self.leader_robot.state.rot is of shape [batch_dim]
+        cos_theta = torch.cos(self.leader_robot.state.rot).unsqueeze(-1)  # [batch_dim, 1]
+        sin_theta = torch.sin(self.leader_robot.state.rot).unsqueeze(-1)  # [batch_dim, 1]
         
         # Define rotation matrices for each batch
-        rotation_matrices = torch.cat([cos_theta, sin_theta, -sin_theta, cos_theta], dim=1).reshape(-1, 2, 2)  # Shape: [batch_dim, 2, 2]
+        rotation_matrices = torch.cat([cos_theta, sin_theta, -sin_theta, cos_theta], dim=1).reshape(-1, 2, 2)  # [batch_dim, 2, 2]
         
         # Apply rotation: [batch_dim, 2, 2] x [batch_dim, 2, 1] -> [batch_dim, 2, 1]
-        optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2]
+        optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # [batch_dim, 2]
 
         return {
             # "pos_rew": self.pos_rew if self.shared_rew else agent.pos_rew,
@@ -2277,6 +2401,7 @@ class Scenario(BaseScenario):
             "optimized_target_pos": optimized_target_pos,  # Transformed to leader's frame
             "graph_list": graph_list,
         }
+    
     
     def extra_render(self, env_index: int = 0) -> "List[Geom]":
         from vmas.simulator import rendering
