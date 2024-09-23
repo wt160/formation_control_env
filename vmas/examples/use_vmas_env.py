@@ -167,7 +167,7 @@ def use_vmas_env(
             f"It took: {total_time}s for {n_steps} steps of {num_envs} parallel environments on device {device} "
             f"for {scenario_name} scenario."
         )
-    with open('collected_data.pkl', 'wb') as f:
+    with open('collected_data_0.pkl', 'wb') as f:
         pickle.dump(collected_data, f)
     print("Collected data saved to 'collected_data.pkl'.")
 
@@ -184,12 +184,24 @@ if __name__ == "__main__":
         scenario_name="formation_control_teacher",
         render=False,
         num_envs=100,
-        n_steps=1000,
+        n_steps=500,
         save_render=False,
         random_action=True,
         continuous_actions=True,
-        collect_num=20,
+        collect_num=5,
     )
+
+
+    # use_vmas_env(
+    #     scenario_name="formation_control_teacher",
+    #     render=False,
+    #     num_envs=1000,
+    #     n_steps=550,
+    #     save_render=False,
+    #     random_action=True,
+    #     continuous_actions=True,
+    #     collect_num=2,
+    # )
 
 
 #collect data for imitation learning

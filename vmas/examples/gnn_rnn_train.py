@@ -14,36 +14,51 @@ with open('collected_data.pkl', 'rb') as f:
     collected_data = pickle.load(f)
 
 # Function to process individual data point into PyG Data object
-def process_data_point(data_point):
-    graph_data_list = data_point['graph_list']
-    optimized_target_pos = data_point['optimized_target_pos']  # dict of agent positions
+batched_dataset = []
 
-    # Assuming one graph per data point
-    graph_data = graph_data_list[0]
+batch_dim = len(collected_data[0]['graph_list'])
+for batch_idx in range(batch_dim):
+    dataset = []
+    for data_point in collected_data:
+        graph_data_list = data_point['graph_list']  # List of graphs with length batch_dim
+        optimized_target_pos = data_point['optimized_target_pos']  # Dict of agent positions with batch_dim
 
-    # Reconstruct the PyG Data object
-    x = torch.tensor(graph_data['x'], dtype=torch.float)
-    edge_index = torch.tensor(graph_data['edge_index'], dtype=torch.long)
-    edge_attr = torch.tensor(graph_data['edge_attr'], dtype=torch.float) if graph_data['edge_attr'] is not None else None
+        # Assuming one graph per data point
+        
+        agent_names = sorted(optimized_target_pos.keys())
+        # optimized_target_pos: dict with keys as agent names and values as tensors of shape [batch_dim, 2]
 
-    # Separate features and categories
-    features = x[:, :-1]  # Node features
-    categories = x[:, -1].long()  # Node categories (0: agent, 1: obstacle)
+        
+            # Get graph data for this batch index
+        graph_data = graph_data_list[batch_idx]
 
-    # Create Data object
-    data = Data(x=features, edge_index=edge_index, edge_attr=edge_attr)
-    data.categories = categories  # Save categories in data
+        # Reconstruct the PyG Data object
+        x = torch.tensor(graph_data['x'], dtype=torch.float)
+        edge_index = torch.tensor(graph_data['edge_index'], dtype=torch.long)
+        edge_attr = torch.tensor(graph_data['edge_attr'], dtype=torch.float) if graph_data['edge_attr'] is not None else None
 
-    # Prepare target positions (ensure consistent ordering)
-    agent_names = sorted(optimized_target_pos.keys())
-    target_positions = [optimized_target_pos[name] for name in agent_names]
-    target_positions = np.stack(target_positions)  # Shape: [num_agents, 2]
-    data.y = torch.tensor(target_positions, dtype=torch.float)
 
-    return data
+        features = x[:, :-1]  # Node features
+        categories = x[:, -1].long()  # Node categories (0: agent, 1: obstacle)
+        # Use the full x as features
+        # features = x  # No separation of categories
+
+        # Create Data object
+        data = Data(x=features, edge_index=edge_index, edge_attr=edge_attr)
+        data.categories = categories  # Save categories in data
+        # Prepare target positions for this batch index
+        target_positions = [optimized_target_pos[name][batch_idx] for name in agent_names]  # List of tensors [2]
+        target_positions = np.stack(target_positions)  # Shape: [num_agents, 2]
+        data.y = torch.tensor(target_positions, dtype=torch.float)
+        # print("data:{}".format(data))
+        # Append to dataset
+        dataset.append(data)
+    batched_dataset.append(dataset)
+    
+    
 
 # Process all data points into Data objects
-data_list = [process_data_point(dp) for dp in collected_data]
+# data_list = [process_data_point(dp) for dp in collected_data]
 
 # Define sequence length
 sequence_length = 5
@@ -57,8 +72,10 @@ def create_sequences(data_list, sequence_length):
         sequences.append(sequence)
     return sequences
 
-sequences = create_sequences(data_list, sequence_length)
-
+batch_sequences = []
+for batch_idx in range(batch_dim):
+    sequences = create_sequences(batched_dataset[batch_idx], sequence_length)
+    batch_sequences += sequences
 # Custom Dataset class
 class SequenceDataset(Dataset):
     def __init__(self, sequences):
@@ -85,17 +102,17 @@ def collate_fn(batch):
     return all_data
 
 # Shuffle and split dataset
-np.random.shuffle(sequences)
-train_size = int(0.8 * len(sequences))
-train_sequences = sequences[:train_size]
-val_sequences = sequences[train_size:]
+np.random.shuffle(batch_sequences)
+train_size = int(0.8 * len(batch_sequences))
+train_sequences = batch_sequences[:train_size]
+val_sequences = batch_sequences[train_size:]
 
 # Create Dataset objects
 train_dataset = SequenceDataset(train_sequences)
 val_dataset = SequenceDataset(val_sequences)
 
 # Create DataLoaders
-batch_size = 8  # Adjust based on your GPU memory
+batch_size = 128  # Adjust based on your GPU memory
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=collate_fn)
 
@@ -119,6 +136,7 @@ class GNN_GRU_Model(nn.Module):
     def forward(self, data_sequence):
         # data_sequence: list of Batch objects (length = sequence_length)
         batch_size = data_sequence[0].num_graphs
+        # print("batch_size:{}".format(batch_size))
         sequence_length = len(data_sequence)
         
         # Store agent embeddings at each time step
@@ -126,6 +144,7 @@ class GNN_GRU_Model(nn.Module):
         
         for t in range(sequence_length):
             data = data_sequence[t]
+            # print('data:{}'.format(data))
             x, edge_index, batch = data.x, data.edge_index, data.batch
             categories = data.categories  # Node categories
             
@@ -137,10 +156,13 @@ class GNN_GRU_Model(nn.Module):
             # Extract agent nodes (category == 0)
             agent_mask = (categories == 0)
             agent_embeddings = x[agent_mask]
+            # print("agent_mask shape:{}".format(agent_mask.shape))
             agent_batch = batch[agent_mask]
-            
+            # print("agent_batch:{}".format(agent_batch.shape))
+            # input("1")
             # Ensure consistent ordering
-            sorted_indices = torch.argsort(agent_batch * self.num_agents + torch.arange(self.num_agents, device=agent_batch.device))
+            agent_ids = torch.arange(self.num_agents, device=agent_batch.device).repeat(batch_size)
+            sorted_indices = torch.argsort(agent_batch * self.num_agents + agent_ids)
             agent_embeddings = agent_embeddings[sorted_indices]
             
             # Reshape agent_embeddings to [batch_size, num_agents, hidden_channels]
@@ -185,6 +207,7 @@ for epoch in range(num_epochs):
     total_loss = 0
     for data_sequence in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}'):
         # Move data to device
+        # print("data_sequence:{}".format(data_sequence))
         data_sequence = [data.to(device) for data in data_sequence]
         optimizer.zero_grad()
         
@@ -194,7 +217,8 @@ for epoch in range(num_epochs):
         # Get target positions from the last time step
         target_data = data_sequence[-1]  # Data object at last time step
         target_positions = target_data.y.view(-1, num_agents, 2).to(device)  # Shape: [batch_size, num_agents, 2]
-        
+        # print("predicted_positions shape:{}".format(predicted_positions.shape))
+        # print("target shape:{}".format(target_positions.shape))
         # Compute loss
         loss = criterion(predicted_positions, target_positions)
         loss.backward()
@@ -212,8 +236,11 @@ for epoch in range(num_epochs):
         for data_sequence in val_loader:
             data_sequence = [data.to(device) for data in data_sequence]
             predicted_positions = model(data_sequence)
+            # print("valication")
+            # print("predicted:{}".format(predicted_positions))
             target_data = data_sequence[-1]
             target_positions = target_data.y.view(-1, num_agents, 2).to(device)
+            # print("target:{}".format(target_positions))
             loss = criterion(predicted_positions, target_positions)
             val_loss += loss.item()
     avg_val_loss = val_loss / len(val_loader)
