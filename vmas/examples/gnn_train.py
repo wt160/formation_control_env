@@ -4,12 +4,13 @@ import torch.optim as optim
 from torch_geometric.data import Data, DataLoader
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import GINConv, global_mean_pool
+from torch_geometric.nn import GATConv
 from tqdm import tqdm
 import pickle
 import numpy as np
 
 # Load the collected data
-with open('collected_data_10.pkl', 'rb') as f:
+with open('collected_data_100.pkl', 'rb') as f:
     collected_data = pickle.load(f)
 
 # Process the data
@@ -53,7 +54,7 @@ train_dataset = dataset[:train_size]
 val_dataset = dataset[train_size:]
 
 # Create DataLoaders
-batch_size = 64
+batch_size = 32
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
@@ -124,45 +125,27 @@ val_loader = DataLoader(val_dataset, batch_size=batch_size)
 #         agent_embeddings = x[agent_node_indices]  # Shape: [batch_size * num_agents, hidden_channels]
 #         return agent_embeddings
 
-
-
-class GINModel(nn.Module):
+class GATModel(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_agents):
-        super(GINModel, self).__init__()
+        super(GATModel, self).__init__()
         self.num_agents = num_agents
 
-        # GIN layers
-        nn1 = nn.Sequential(
-            nn.Linear(in_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        )
-        self.conv1 = GINConv(nn1)
-
-        nn2 = nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        )
-        self.conv2 = GINConv(nn2)
-
-        nn3 = nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels)
-        )
-        self.conv3 = GINConv(nn3)
+        # GAT layers
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
 
         # Global pooling layer
         self.pool = global_mean_pool
 
         # Fully connected layers
         self.fc1 = nn.Sequential(
-            nn.Linear(hidden_channels * 2, hidden_channels),
-            nn.ReLU(),
-            nn.Dropout(p=0.5)
+            nn.Linear(hidden_channels * 16, hidden_channels*4),
+            nn.ReLU()
+            # nn.Dropout(p=0.5)
         )
-        self.fc2 = nn.Linear(hidden_channels, out_channels)
+        self.fc2 = nn.Linear(4*hidden_channels, out_channels)
+
 
     def forward(self, data):
         """
@@ -173,33 +156,42 @@ class GINModel(nn.Module):
             predicted_positions (torch.Tensor): Predicted positions for all agents in all graphs.
                                                Shape: [batch_size, num_agents, out_channels]
         """
-        x, edge_index = data.x, data.edge_index
-
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        torch.set_printoptions(threshold=torch.inf)
+        # print("x before GIN:{}".format(x))
+        # print("x shape:{}".format(x.shape))
+        # print("edge_index before GIN:{}".format(edge_index))
+        # input("0")
         # GIN Layers
-        x = self.conv1(x, edge_index)
+        # print("edge_attr shape:{}".format(edge_attr.squeeze(dim=1).shape))
+        x = self.conv1(x, edge_index, edge_attr.squeeze(dim=1))
         x = torch.relu(x)
-        x = self.conv2(x, edge_index)
+        # print("x after conv1:{}".format(x))
+        # print("after4 conv1 x shape:{}".format(x.shape))
+        # input("0, 1")
+        x = self.conv2(x, edge_index, edge_attr)
         x = torch.relu(x)
-        x = self.conv3(x, edge_index)
+        x = self.conv3(x, edge_index, edge_attr)
         x = torch.relu(x)
-
+        # print("x:{}".format(x))
         # Global graph embedding
         graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels]
 
         # Extract agent node embeddings
         agent_embeddings = self.extract_agent_embeddings(x, data.batch, data.num_graphs)
-
+        # print("agent_embedding:{}".format(agent_embeddings))
+        # input("1")
         # Repeat graph embedding for each agent
         graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)  # Shape: [batch_size*num_agents, hidden_channels]
 
         # Concatenate agent embeddings with graph embeddings
         combined = torch.cat([agent_embeddings, graph_embedding_repeated], dim=1)  # Shape: [batch_size*num_agents, 2*hidden_channels]
-
+        # print("combined shape:{}".format(combined.shape))
         # Fully connected layers
         combined = self.fc1(combined)
         combined = torch.relu(combined)
         predicted_positions = self.fc2(combined)  # Shape: [batch_size*num_agents, out_channels]
-
+        # print("202 predicted positions:{}".format(predicted_positions))
         # Reshape to [batch_size, num_agents, out_channels]
         predicted_positions = predicted_positions.view(data.num_graphs, self.num_agents, -1)
         return predicted_positions
@@ -228,6 +220,8 @@ class GINModel(nn.Module):
         agent_node_indices = torch.cat(agent_node_indices, dim=0)
         agent_embeddings = x[agent_node_indices]  # Shape: [batch_size * num_agents, hidden_channels]
         return agent_embeddings
+    
+
 num_agents=5
 sample_graph = dataset[0]
 in_channels = sample_graph.x.shape[1]
@@ -236,7 +230,7 @@ out_channels = 2  # Assuming 2D positions
 
 # Initialize the model, loss function, and optimizer
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = GINModel(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels, num_agents=num_agents).to(device)
+model = GATModel(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels, num_agents=num_agents).to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
@@ -252,6 +246,9 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
         
         # Forward pass
+        # print("data:{}".format(data))
+        # print("data batch:{}".format(data.batch))
+        # print("data x:{}".format(data.x))
         predicted_positions = model(data)  # Shape: [batch_size, num_agents, 2]
         
         # Get target positions
@@ -259,6 +256,11 @@ for epoch in range(num_epochs):
         target_positions = target_positions.view(-1, num_agents, 2)  # Shape: [batch_size, num_agents, 2]
         
         # Compute loss
+        # print("predicted_positions shape:{}".format(predicted_positions))
+        # print("target_positions shape:{}".format(target_positions))
+        # input("1")
+
+
         loss = criterion(predicted_positions, target_positions)
         loss.backward()
         optimizer.step()
