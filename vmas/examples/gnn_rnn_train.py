@@ -10,7 +10,7 @@ import pickle
 import numpy as np
 
 # Load the collected data
-with open('collected_data.pkl', 'rb') as f:
+with open('collected_data_tunnel.pkl', 'rb') as f:
     collected_data = pickle.load(f)
 
 # Function to process individual data point into PyG Data object

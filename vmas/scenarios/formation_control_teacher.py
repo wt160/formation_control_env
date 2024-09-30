@@ -258,7 +258,7 @@ class Scenario(BaseScenario):
                 shape=Sphere(radius=self.agent_radius),
                 render_action=True,
                 dynamics=HolonomicWithRotation(), 
-                linear_friction=1,
+                linear_friction=0,
                 sensors=(
                     [
                         Lidar(
@@ -296,7 +296,7 @@ class Scenario(BaseScenario):
                 shape=Sphere(radius=self.agent_radius),
                 render_action=True,
                 dynamics=HolonomicWithRotation(), 
-                linear_friction=1,
+                linear_friction=0,
                 sensors=(
                     [
                         Lidar(
@@ -365,7 +365,7 @@ class Scenario(BaseScenario):
         self.FOV_max = 0.45 * torch.pi
         self.observe_D = 0.6
         self.last_policy_output = None
-        history_length = 5  # Example: store last 5 positions
+        history_length = 1  # Example: store last 5 positions
         self.agent_history = AgentHistory(
             batch_dim=batch_dim,
             num_agents=self.n_agents,
@@ -395,7 +395,7 @@ class Scenario(BaseScenario):
                 world.add_landmark(obs)
         elif obstacle_pattern == 1:
             #random located obstalces
-            self.n_boxes = 1
+            self.n_boxes = 100
             self.box_width = 0.1
             for i in range(self.n_boxes):
                 obs = Landmark(
@@ -482,8 +482,8 @@ class Scenario(BaseScenario):
             # Generate the center of the polygon
             center = torch.tensor(
                 [
-                    np.random.uniform(-world_semidim + 1.5, world_semidim - 1.5),
-                    np.random.uniform(-world_semidim + 1.5, world_semidim - 1.5),
+                    np.random.uniform(-world_semidim + 2, world_semidim - 1.5),
+                    np.random.uniform(-world_semidim + 2, world_semidim - 1.5),
                 ],
                 dtype=torch.float32,
                 device=device,
@@ -1136,7 +1136,7 @@ class Scenario(BaseScenario):
                         scan_step,
                         dim
                     )
-
+                    # new_direction = current_direction
                     # Smoothly adjust the current direction
                     max_steering_angle = 0.06  # Maximum change in direction per step
                     delta_angle = new_direction - current_direction
@@ -2099,126 +2099,64 @@ class Scenario(BaseScenario):
         return batch
 
 
-    def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, previous_positions):
-        """
-        Constructs a graph with node features including current and previous positions.
+    # def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, previous_positions):
+    #     """
+    #     Constructs a graph with node features including current and previous positions.
 
-        Args:
-            nominal_formation_tensor (torch.Tensor): Tensor of shape [agent_num, 2] containing [x, y].
-            near_obstacles_in_leader_frame (torch.Tensor or None): Tensor of shape [num_near_obstacles, 2] or None.
-            previous_positions (torch.Tensor): Tensor of shape [agent_num, history_length, 2] containing previous positions.
+    #     Args:
+    #         nominal_formation_tensor (torch.Tensor): Tensor of shape [agent_num, 2] containing [x, y].
+    #         near_obstacles_in_leader_frame (torch.Tensor or None): Tensor of shape [num_near_obstacles, 2] or None.
+    #         previous_positions (torch.Tensor): Tensor of shape [agent_num, history_length, 2] containing previous positions.
 
-        Returns:
-            Data: A PyTorch Geometric Data object representing the graph.
-        """
+    #     Returns:
+    #         Data: A PyTorch Geometric Data object representing the graph.
+    #     """
 
-        if near_obstacles_in_leader_frame is not None and near_obstacles_in_leader_frame.numel() != 0:
-            # Assign a category to distinguish between agents and obstacles
-            agent_categories = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [agent_num, 1]
-            obstacle_categories = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [num_obstacles, 1]
+    #     if near_obstacles_in_leader_frame is not None and near_obstacles_in_leader_frame.numel() != 0:
+    #         # Assign a category to distinguish between agents and obstacles
+    #         agent_categories = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [agent_num, 1]
+    #         obstacle_categories = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [num_obstacles, 1]
             
-            # Concatenate positions and previous positions for agents
-            # Flatten previous_positions: [agent_num, history_length * 2]
-            history_length = previous_positions.size(1)
-            previous_positions_flat = previous_positions.view(nominal_formation_tensor.size(0), -1)  # [agent_num, history_length * 2]
-            agent_features = torch.cat([nominal_formation_tensor, previous_positions_flat], dim=1)  # [agent_num, 2 + history_length * 2]
+    #         # Concatenate positions and previous positions for agents
+    #         # Flatten previous_positions: [agent_num, history_length * 2]
+    #         history_length = previous_positions.size(1)
+    #         previous_positions_flat = previous_positions.view(nominal_formation_tensor.size(0), -1)  # [agent_num, history_length * 2]
+    #         agent_features = torch.cat([nominal_formation_tensor, previous_positions_flat], dim=1)  # [agent_num, 2 + history_length * 2]
             
-            # For obstacles, previous positions can be set to zero or handled differently
-            # Here, we set them to zero since obstacles may be static
-            obstacle_features = torch.cat([
-                near_obstacles_in_leader_frame,  # [num_obstacles, 2]
-                torch.zeros((near_obstacles_in_leader_frame.size(0), history_length * 2), device=self.device)  # [num_obstacles, history_length * 2]
-            ], dim=1)  # [num_obstacles, 2 + history_length * 2]
+    #         # For obstacles, previous positions can be set to zero or handled differently
+    #         # Here, we set them to zero since obstacles may be static
+    #         obstacle_features = torch.cat([
+    #             near_obstacles_in_leader_frame,  # [num_obstacles, 2]
+    #             torch.zeros((near_obstacles_in_leader_frame.size(0), history_length * 2), device=self.device)  # [num_obstacles, history_length * 2]
+    #         ], dim=1)  # [num_obstacles, 2 + history_length * 2]
             
-            # Concatenate all node features
-            x = torch.cat([agent_features, obstacle_features], dim=0)  # [agent_num + num_obstacles, 2 + history_length * 2]
+    #         # Concatenate all node features
+    #         x = torch.cat([agent_features, obstacle_features], dim=0)  # [agent_num + num_obstacles, 2 + history_length * 2]
             
-            # Assign categories as additional node features if needed
-            # For example, concatenate categories to node features
-            categories = torch.cat([agent_categories, obstacle_categories], dim=0)  # [agent_num + num_obstacles, 1]
-            x = torch.cat([x, categories], dim=1)  # [agent_num + num_obstacles, 3 + history_length * 2]
-        else:
-            # Only agents, no obstacles
-            history_length = previous_positions.size(1)
-            previous_positions_flat = previous_positions.view(nominal_formation_tensor.size(0), -1)  # [agent_num, history_length * 2]
-            x = torch.cat([nominal_formation_tensor, previous_positions_flat], dim=1)  # [agent_num, 2 + history_length * 2]
-            categories = torch.zeros((x.size(0), 1), device=self.device)  # [agent_num, 1]
-            x = torch.cat([x, categories], dim=1)  # [agent_num, 3 + history_length * 2]
-
-
-        # Define edges based on your specific requirements
-        # For simplicity, let's assume a fully connected graph without self-loops
-        edge_index = []
-        edge_attr = []
-
-        # Number of agents and obstacles
-        num_agents = nominal_formation_tensor.size(0)
-        threshold_distance= 0.8
-        # Connect each nominal formation agent with near obstacles
-        if near_obstacles_in_leader_frame != None:
-            num_obstacles = near_obstacles_in_leader_frame.size(0)
-            for agent_index in range(num_agents):
-                agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
-                for obstacle_index in range(num_obstacles):
-                    obstacle_pos = near_obstacles_in_leader_frame[obstacle_index, :2]  # Get the position part
-                    distance = torch.norm(agent_pos - obstacle_pos)
-                    if distance <= threshold_distance:  # Check if within threshold distance
-                        # Add edges from agent to obstacle
-                        edge_index.append([agent_index, num_agents + obstacle_index])  # Agent to obstacle
-                        edge_index.append([num_agents + obstacle_index, agent_index])  # Obstacle to agent
-                        edge_attr.append([1])  # Edge type 1 for agent-obstacle
-                        
-        # Connect each pair of nominal formation agents
-        for i in range(num_agents):
-            for j in range(i + 1, num_agents):
-                # Add edges between agents
-                edge_index.append([i, j])  # Agent to agent
-                edge_index.append([j, i])  # Agent to agent (reverse direction)
-                edge_attr.append([0])  # Edge type 0 for agent-agent
-
-        # Convert edge index and edge attributes to tensors
-        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # Shape: [2, num_edges]
-        edge_attr = torch.tensor(edge_attr, dtype=torch.float)  # Shape: [num_edges, 1]
-
-        # Create the PyTorch Geometric data object
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-        
-        return data
-
-
-    # def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, threshold_distance=1.0):
-    #     # print("nominal_formation_tensor shape:{}".format(nominal_formation_tensor.shape))
-        
-    #     nominal_formation_category = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [5, 1] with category 0
-    #     nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
-    #     if near_obstacles_in_leader_frame != None:
-    #         # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
-        
-        
-    #         near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
-    #         near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
-    #         num_obstacles = near_obstacles_in_leader_frame.size(0)
-        
-
-
-    #     # Add a category feature to each node (0 for nominal formation, 1 for obstacles)
-        
-    #     # Concatenate category feature to position tensors
-    #     x = None
-    #     # Combine all node features into a single tensor
-    #     if near_obstacles_in_leader_frame != None:
-    #         x = torch.cat((nominal_formation_tensor, near_obstacles_in_leader_frame), dim=0)  # Shape: [5 + obstacle_num, 3]
+    #         # Assign categories as additional node features if needed
+    #         # For example, concatenate categories to node features
+    #         categories = torch.cat([agent_categories, obstacle_categories], dim=0)  # [agent_num + num_obstacles, 1]
+    #         x = torch.cat([x, categories], dim=1)  # [agent_num + num_obstacles, 3 + history_length * 2]
     #     else:
-    #         x = nominal_formation_tensor
-    #     # Initialize edge index and edge attributes
+    #         # Only agents, no obstacles
+    #         history_length = previous_positions.size(1)
+    #         previous_positions_flat = previous_positions.view(nominal_formation_tensor.size(0), -1)  # [agent_num, history_length * 2]
+    #         x = torch.cat([nominal_formation_tensor, previous_positions_flat], dim=1)  # [agent_num, 2 + history_length * 2]
+    #         categories = torch.zeros((x.size(0), 1), device=self.device)  # [agent_num, 1]
+    #         x = torch.cat([x, categories], dim=1)  # [agent_num, 3 + history_length * 2]
+
+
+    #     # Define edges based on your specific requirements
+    #     # For simplicity, let's assume a fully connected graph without self-loops
     #     edge_index = []
     #     edge_attr = []
 
     #     # Number of agents and obstacles
     #     num_agents = nominal_formation_tensor.size(0)
-        
+    #     threshold_distance= 0.8
     #     # Connect each nominal formation agent with near obstacles
     #     if near_obstacles_in_leader_frame != None:
+    #         num_obstacles = near_obstacles_in_leader_frame.size(0)
     #         for agent_index in range(num_agents):
     #             agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
     #             for obstacle_index in range(num_obstacles):
@@ -2246,6 +2184,75 @@ class Scenario(BaseScenario):
     #     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
         
     #     return data
+
+
+    def single_graph_from_data(self, nominal_formation_tensor, near_obstacles_in_leader_frame, threshold_distance=1):
+        # print("nominal_formation_tensor shape:{}".format(nominal_formation_tensor.shape))
+        
+        nominal_formation_category = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [5, 1] with category 0
+        nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
+        if near_obstacles_in_leader_frame != None:
+            # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
+        
+        
+            near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
+            near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
+            num_obstacles = near_obstacles_in_leader_frame.size(0)
+        
+
+
+        # Add a category feature to each node (0 for nominal formation, 1 for obstacles)
+        
+        # Concatenate category feature to position tensors
+        x = None
+        # Combine all node features into a single tensor
+        if near_obstacles_in_leader_frame != None:
+            x = torch.cat((nominal_formation_tensor, near_obstacles_in_leader_frame), dim=0)  # Shape: [5 + obstacle_num, 3]
+        else:
+            x = nominal_formation_tensor
+        # Initialize edge index and edge attributes
+        edge_index = []
+        edge_attr = []
+
+        # Number of agents and obstacles
+        num_agents = nominal_formation_tensor.size(0)
+        
+        # Connect each nominal formation agent with near obstacles
+        if near_obstacles_in_leader_frame != None:
+            for agent_index in range(num_agents):
+                agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
+                for obstacle_index in range(num_obstacles):
+                    obstacle_pos = near_obstacles_in_leader_frame[obstacle_index, :2]  # Get the position part
+                    distance = torch.norm(agent_pos - obstacle_pos)
+                    if distance <= threshold_distance:  # Check if within threshold distance
+                        # Add edges from agent to obstacle
+                        edge_index.append([agent_index, num_agents + obstacle_index])  # Agent to obstacle
+                        edge_index.append([num_agents + obstacle_index, agent_index])  # Obstacle to agent
+                        edge_attr.append([distance])  # Edge type 1 for agent-obstacle
+                        edge_attr.append([distance])
+        # Connect each pair of nominal formation agents
+        for i in range(num_agents):
+            for j in range(i + 1, num_agents):
+                # Add edges between agents
+                agent_pos_i = nominal_formation_tensor[i, :2]  # Get the position part
+                agent_pos_j = nominal_formation_tensor[j, :2]  # Get the position part
+
+                distance = torch.norm(agent_pos_j - agent_pos_i)
+                if distance <= 0.8:  # Check if within threshold distance
+                    # Add edges from agent to obstacle
+                    # print("add edges index")
+                    edge_index.append([i,  j])  # Agent to obstacle
+                    edge_index.append([j, i])  # Obstacle to agent
+                    edge_attr.append([distance])  # Edge type 1 for agent-obstacle
+                    edge_attr.append([distance])
+        # Convert edge index and edge attributes to tensors
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # Shape: [2, num_edges]
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float)  # Shape: [num_edges, 1]
+
+        # Create the PyTorch Geometric data object
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        
+        return data
 
 
 
@@ -2353,9 +2360,10 @@ class Scenario(BaseScenario):
             nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 2), device=self.device)
             
             # Define nominal positions for agents (assuming 5 agents)
-            nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
-            nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
-            
+            # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
+            # nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
+            nominal_positions_x = [0.0, -0.5534992, -0.5534992, -0.95179105, -0.95179105]
+            nominal_positions_y = [0.0, 0.35284618, -0.35284618, 0.7946659, -0.7946659]
             for i, nomi_agent in enumerate(self.world.agents):
                 nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
                 nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
@@ -2376,8 +2384,8 @@ class Scenario(BaseScenario):
                 cos_theta = torch.cos(leader_rot)
                 sin_theta = torch.sin(leader_rot)
                 # print("sin_theta shape:{}".format(sin_theta.shape))
-                rotation_matrix = torch.tensor([[cos_theta, sin_theta],
-                                                [-sin_theta, cos_theta]], device=self.device)  # [2, 2]
+                rotation_matrix = torch.tensor([[cos_theta, -sin_theta],
+                                                [sin_theta, cos_theta]], device=self.device)  # [2, 2]
                 
                 # Apply rotation to each agent's previous positions
                 # Reshape for batch matrix multiplication
@@ -2401,14 +2409,21 @@ class Scenario(BaseScenario):
                     
                     
                     # Apply rotation: (num_obstacles, 2) x (2, 2) -> (num_obstacles, 2)
-                    near_obstacles_in_leader_frame = torch.matmul(translated_obstacles, rotation_matrix)
+                    near_obstacles_in_leader_frame = torch.matmul(translated_obstacles , rotation_matrix)
                     
-                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame, transformed_prev_positions_batch)
+                    # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame, transformed_prev_positions_batch)
+                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame)
+
                 else:
-                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None, transformed_prev_positions_batch)
+                    # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None, transformed_prev_positions_batch)
+                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None)
                 
                 graph_list.append(current_graph)
+            
             # End of batch_dim loop
+            # for d in range(self.world.batch_dim):
+            #     current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None)
+            #     graph_list.append(current_graph)
 
         # ============================
         # Transform optimized_target_pos
