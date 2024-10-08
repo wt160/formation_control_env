@@ -173,6 +173,7 @@ class Scenario(BaseScenario):
         world = World(batch_dim, device, substeps=2)
         world._x_semidim = self.world_semidim
         world._y_semidim = self.world_semidim
+        # self.world = world
         known_colors = [
             (0.22, 0.49, 0.72),
             (1.00, 0.50, 0),
@@ -395,7 +396,23 @@ class Scenario(BaseScenario):
                 world.add_landmark(obs)
         elif obstacle_pattern == 1:
             #random located obstalces
-            self.n_boxes = 100
+            self.n_boxes = 50
+            self.box_width = 0.1
+            # for i in range(self.n_boxes):
+            #     obs = Landmark(
+            #         name=f"obs_{i}",
+            #         collide=True,
+            #         movable=False,
+            #         shape=Sphere(radius=self.box_width),
+            #         color=Color.RED,
+            #         # collision_filter=lambda e: not isinstance(e.shape, Sphere),
+            #     )
+                
+            #     self.obstacles.append(obs)
+            #     world.add_landmark(obs)
+        elif obstacle_pattern == 5:
+            #random located obstalces
+            self.n_boxes = 80
             self.box_width = 0.1
             for i in range(self.n_boxes):
                 obs = Landmark(
@@ -409,7 +426,6 @@ class Scenario(BaseScenario):
                 
                 self.obstacles.append(obs)
                 world.add_landmark(obs)
-        
         elif obstacle_pattern == 2:
             #random located obstalces
             self.n_boxes = 50
@@ -467,35 +483,55 @@ class Scenario(BaseScenario):
         passage_indexes = []
         j = self.n_boxes // 2
         line_segments = []  # Store line segments to maintain continuity
-
+        polygon_list = []
         def create_polygon(
-            num_vertices_min=5, 
-            num_vertices_max=8, 
+            existing_centers,
+            num_vertices_min=8, 
+            num_vertices_max=12, 
             sphere_radius=0.1, 
             max_spheres_per_polygon=50, 
             world_semidim=5.0, 
             device='cuda'
         ):
             # Random number of vertices between min and max
-            num_vertices = np.random.randint(num_vertices_min, num_vertices_max + 1)
+            num_vertices = np.random.randint(num_vertices_min, num_vertices_max)
             
-            # Generate the center of the polygon
-            center = torch.tensor(
-                [
-                    np.random.uniform(-world_semidim + 2, world_semidim - 1.5),
-                    np.random.uniform(-world_semidim + 2, world_semidim - 1.5),
-                ],
-                dtype=torch.float32,
-                device=device,
-            )
+            # Determine the minimum distance between centers to prevent overlap
+            min_center_distance = 1.5  # Adjust based on polygon size and desired spacing
             
-            # Generate random angles and radii
-            angles = torch.rand(num_vertices) * 2 * np.pi  # Random angles between 0 and 2π
+            # Loop until a suitable center is found
+            max_attempts = 100
+            for attempt in range(max_attempts):
+                # Generate a random center
+                center = torch.tensor(
+                    [
+                        np.random.uniform(-world_semidim + 2, world_semidim - 2),
+                        np.random.uniform(-world_semidim + 2, world_semidim - 2),
+                    ],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                
+                # Check if the center is far enough from existing centers
+                if all(torch.norm(center - c) >= min_center_distance for c in existing_centers):
+                    break  # Suitable center found
+            else:
+                raise ValueError("Could not find a non-overlapping center after maximum attempts.")
+            
+            # Add the new center to the list of existing centers
+            existing_centers.append(center)
+            
+            # Generate evenly spaced angles with a small random perturbation
+            base_angles = torch.linspace(0, 2 * np.pi, num_vertices + 1)[:-1]  # Exclude the last point (2π)
+            random_offsets = (torch.rand(num_vertices) - 0.5) * (2 * np.pi / num_vertices * 0.5)  # Up to ±25% of segment
+            angles = base_angles + random_offsets
+            angles = angles % (2 * np.pi)  # Ensure angles are within [0, 2π)
             angles, _ = torch.sort(angles)  # Sort angles to maintain order around the center
             
-            min_radius = 0.3  # Minimum distance from the center
-            max_radius = 0.5  # Maximum distance from the center
-            radii = torch.rand(num_vertices) * (max_radius - min_radius) + min_radius
+            min_radius = 0.5  # Minimum distance from the center
+            max_radius = 0.8   # Maximum distance from the center
+            mean_radius = np.random.uniform(min_radius, max_radius)
+            radii = torch.rand(num_vertices) * (0.1) + mean_radius
             
             # Generate vertices of the polygon
             vertices = []
@@ -520,7 +556,7 @@ class Scenario(BaseScenario):
                 direction = segment_vector / segment_length  # Normalize to get direction
                 
                 # Calculate the number of spheres to minimize gaps
-                num_spheres_along_edge = max(int(torch.ceil(segment_length / sphere_diameter).item()), 1)
+                num_spheres_along_edge = max(int(torch.ceil(segment_length / sphere_diameter).item()), 1) + 1
                 
                 # Adjust if total spheres exceed the maximum allowed
                 if total_spheres + num_spheres_along_edge > max_spheres_per_polygon:
@@ -532,7 +568,7 @@ class Scenario(BaseScenario):
                 if num_spheres_along_edge > 1:
                     spacing = segment_length / (num_spheres_along_edge - 1)
                 else:
-                    spacing = 0  # Only one sphere on this edge
+                    spacing = segment_length / 2.0  # Only one sphere on this edge
                 
                 # Place spheres along the edge
                 for idx in range(num_spheres_along_edge):
@@ -545,81 +581,8 @@ class Scenario(BaseScenario):
                 if total_spheres >= max_spheres_per_polygon:
                     break  # Stop adding spheres if maximum reached
 
-            return positions
-
-        # def create_polygon(num_vertices_min=5, num_vertices_max=8, sphere_radius=0.1, max_spheres_per_polygon=20, world_semidim=5.0, device='cpu'):
-        #     # Random number of vertices between min and max
-        #     num_vertices = np.random.randint(num_vertices_min, num_vertices_max + 1)
-            
-        #     # Generate the center of the polygon
-        #     center = torch.tensor(
-        #         [
-        #             np.random.uniform(-world_semidim+1.5, world_semidim),
-        #             np.random.uniform(-world_semidim, world_semidim),
-        #         ],
-        #         dtype=torch.float32,
-        #         device=device,
-        #     )
-            
-        #     # Generate random angles and radii
-        #     angles = torch.rand(num_vertices) * 2 * np.pi  # Random angles between 0 and 2π
-        #     angles, _ = torch.sort(angles)  # Sort angles to maintain order around the center
-            
-        #     min_radius = 0.3  # Adjust to control the minimum distance from the center
-        #     max_radius = 0.5  # Adjust to control the maximum distance from the center
-        #     radii = torch.rand(num_vertices) * (max_radius - min_radius) + min_radius  # Random radii between min_radius and max_radius
-            
-        #     # Generate vertices using random angles and radii
-        #     vertices = []
-        #     for angle, radius in zip(angles, radii):
-        #         vertex = center + torch.tensor(
-        #             [torch.cos(angle) * radius, torch.sin(angle) * radius],
-        #             device=device
-        #         )
-        #         vertices.append(vertex)
-            
-        #     # Close the polygon by connecting the last vertex to the first
-        #     vertices.append(vertices[0])
-            
-        #     # Prepare to generate positions for spheres along the boundary
-        #     positions = []
-        #     sphere_diameter = 2 * sphere_radius
-            
-        #     total_spheres = 0  # Keep track of the total number of spheres
-            
-        #     for i in range(len(vertices) - 1):
-        #         start_pos = vertices[i]
-        #         end_pos = vertices[i + 1]
-        #         segment_vector = end_pos - start_pos
-        #         segment_length = torch.norm(segment_vector)
-        #         direction = segment_vector / segment_length  # Normalize to get direction
+            return positions, existing_centers
                 
-        #         # Number of spheres along this segment based on sphere diameter
-        #         num_spheres_along_edge = int(torch.floor(segment_length / sphere_diameter).item())
-                
-        #         # Ensure at least one sphere per edge
-        #         num_spheres_along_edge = max(num_spheres_along_edge, 1)
-                
-        #         # Adjust if total spheres exceed the maximum allowed
-        #         if total_spheres + num_spheres_along_edge > max_spheres_per_polygon:
-        #             num_spheres_along_edge = max_spheres_per_polygon - total_spheres
-        #             if num_spheres_along_edge <= 0:
-        #                 break  # Stop adding spheres if maximum reached
-                
-        #         # Place spheres along the edge
-        #         for idx in range(num_spheres_along_edge):
-        #             offset = sphere_diameter * idx  # Distance along the edge
-        #             sphere_pos = start_pos + offset * direction
-        #             positions.append(sphere_pos)
-        #             total_spheres += 1
-        #             if total_spheres >= max_spheres_per_polygon:
-        #                 break  # Stop adding spheres if maximum reached
-                
-        #         if total_spheres >= max_spheres_per_polygon:
-        #             break  # Stop adding spheres if maximum reached
-
-        #     return positions
-        
 
         def create_line_segment():
             # Fixed spacing between spheres
@@ -686,8 +649,45 @@ class Scenario(BaseScenario):
             elif obstacle_pattern == 1:
                 # Generate line segments if not already done
                 if len(line_segments) == 0:
-                    while len(line_segments) < self.n_boxes:
-                        line_segments.extend(create_polygon(num_vertices_min=5, num_vertices_max=10))
+
+                    num_polygons = np.random.randint(5, 8)
+                    outer_existing_centers = []
+                    # Generate polygons and collect positions
+                    for _ in range(num_polygons):
+                        positions, outer_existing_centers = create_polygon(
+                            existing_centers=outer_existing_centers,
+                            num_vertices_min=8,
+                            num_vertices_max=12,
+                            sphere_radius=0.1,
+                            world_semidim=self.world_semidim,
+                            device=self.device
+                        )
+                        line_segments.extend(positions)
+
+                    # Now, create obstacles equal to the number of positions
+                    total_positions = len(line_segments)
+                    self.obstacles = []  # Clear any existing obstacles
+                    for obs_idx in range(total_positions):
+                        obs = Landmark(
+                            name=f"obs_{obs_idx}",
+                            collide=True,
+                            movable=False,
+                            shape=Sphere(radius=0.1),
+                            color=Color.RED,
+                        )
+                        self.obstacles.append(obs)
+                        self.world.add_landmark(obs)
+
+                    # Assign positions to obstacles
+                    for idx, obs in enumerate(self.obstacles):
+                        obs.set_pos(line_segments[idx], batch_index=env_index)
+                                
+                                
+                                
+                    
+                    
+                    
+                    
                 
                 # Assign positions from the pre-generated line segments
                 positions = []
@@ -696,7 +696,7 @@ class Scenario(BaseScenario):
                     i_value = i[idx].item()  # Convert single element tensor to scalar
                     if i_value < len(line_segments):
                         # Add random noise to line_segments[i_value]
-                        noise = torch.randn(line_segments[i_value].shape, device=self.device) * 0.05  # Scale noise as needed
+                        noise = torch.randn(line_segments[i_value].shape, device=self.device) * 0.001  # Scale noise as needed
                         noisy_position = line_segments[i_value] + noise  # Add noise to the line segment
                         positions.append(noisy_position)
                     else:
@@ -841,25 +841,131 @@ class Scenario(BaseScenario):
                     device=self.world.device,
                     ).repeat(i.shape[0], 1)
                     return pos
+            elif obstacle_pattern == 5:
+                # New obstacle pattern: vertical walls formed by spheres
 
-        # Initialize positions and assign to obstacles
-        i = torch.zeros(
-            (self.world.batch_dim,) if env_index is None else (1,),
-            dtype=torch.int,
-            device=self.world.device,
-        )
+                if len(line_segments) == 0:
+                    # Generate obstacle positions
+                    num_clusters = np.random.randint(5, 8)
+                    x_positions = np.linspace(-self.world_semidim + 2, self.world_semidim - 1, num_clusters)
+                    print("x_positions:{}".format(x_positions))
+                    input("1")
+                    for x in x_positions:
+                        y_start = -self.world_semidim + 1
+                        y_end = self.world_semidim - 1
+                        total_y_length = y_end - y_start
 
-        for obs in self.obstacles:
-            obs.set_pos(get_pos(i), batch_index=env_index)
-            i += 1
+                        num_segments = np.random.randint(3, 5)
+                        segment_length = total_y_length / num_segments
 
-        # Create obstacle managers for each batch
-        for d in range(self.world.batch_dim):
-            single_batch_obstacles = [obs.state.pos[d,:].squeeze() for obs in self.obstacles]
-            manager = ObstacleManager(single_batch_obstacles)
-            self.obstacle_manager_list.append(manager)
- 
+                        for seg_idx in range(num_segments):
+                            if np.random.rand() < 0.7:
+                                
+                                wall_y_start = y_start + seg_idx * segment_length
+                                wall_y_end = wall_y_start + segment_length * np.random.uniform(0.3, 0.6)
 
+                                y_positions = np.arange(wall_y_start, wall_y_end, 2 * self.box_width + 0.01)
+
+                                for y in y_positions:
+                                    position = torch.tensor([x, y], dtype=torch.float32, device=self.device)
+                                    line_segments.append(position)
+
+                # Assign positions from the pre-generated line_segments
+                positions = []
+                for idx in range(i.shape[0]):
+                    i_value = i[idx].item()
+                    if i_value < len(line_segments):
+                        positions.append(line_segments[i_value])
+                    else:
+                        return None
+                        # If we run out of pre-generated positions, assign random positions
+                        # positions.append(torch.tensor(
+                        #     [
+                        #         np.random.uniform(-self.world_semidim, self.world_semidim),
+                        #         np.random.uniform(-self.world_semidim, self.world_semidim),
+                        #     ],
+                        #     dtype=torch.float32,
+                        #     device=self.device,
+                        # ))
+                return torch.stack(positions)
+
+
+        if obstacle_pattern != 1:
+            # Initialize positions and assign to obstacles
+            i = torch.zeros(
+                (self.world.batch_dim,) if env_index is None else (1,),
+                dtype=torch.int,
+                device=self.world.device,
+            )
+
+            for obs in self.obstacles:
+                pos = get_pos(i)
+                if pos != None:
+                    obs.set_pos(get_pos(i), batch_index=env_index)
+                    i += 1
+
+            # Create obstacle managers for each batch
+            for d in range(self.world.batch_dim):
+                single_batch_obstacles = [obs.state.pos[d,:].squeeze() for obs in self.obstacles]
+                manager = ObstacleManager(single_batch_obstacles)
+                self.obstacle_manager_list.append(manager)
+        else:
+            if len(line_segments) == 0:
+
+                num_polygons = np.random.randint(5, 8)
+                outer_existing_centers = []
+                polygon_dict = {}
+                # Generate polygons and collect positions
+                for poly_idx in range(num_polygons):
+                    positions, outer_existing_centers = create_polygon(
+                        existing_centers=outer_existing_centers,
+                        num_vertices_min=8,
+                        num_vertices_max=12,
+                        sphere_radius=0.1,
+                        world_semidim=self.world_semidim,
+                        device=self.device
+                    )
+                    sphere_start_idx = len(line_segments)
+                    line_segments.extend(positions)
+                    sphere_end_idx = len(line_segments) 
+                    polygon_list.append(positions)
+                    polygon_dict[poly_idx] = list(range(sphere_start_idx, sphere_end_idx))
+                # Now, create obstacles equal to the number of positions
+                total_positions = len(line_segments)
+                self.obstacles = []  # Clear any existing obstacles
+                for obs_idx in range(total_positions):
+                    obs = Landmark(
+                        name=f"obs_{obs_idx}",
+                        collide=True,
+                        movable=False,
+                        shape=Sphere(radius=0.1),
+                        color=Color.RED,
+                    )
+                    self.obstacles.append(obs)
+                    self.world.add_landmark(obs)
+
+                # Assign positions to obstacles
+                for polygon_idx, polygon_positions in enumerate(polygon_list):
+                    sphere_list = polygon_dict[polygon_idx]
+                    # noisy_position = line_segments[i_value] + noise  # Add noise to the line segment
+                    for d in range(self.world.batch_dim):
+                    
+                        noise = torch.randn(line_segments[0].shape, device=self.device) * 0.08 # Scale noise as needed
+                    
+                        for sphere_idx in sphere_list:
+                            self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
+                # for idx, obs in enumerate(self.obstacles):
+                #     obs.set_pos(line_segments[idx], batch_index=env_index)
+
+
+                self.obstacle_manager_list = []
+                for d in range(self.world.batch_dim):
+                    single_batch_obstacles = [obs.state.pos[d, :].squeeze() for obs in self.obstacles]
+                    manager = ObstacleManager(single_batch_obstacles)
+                    self.obstacle_manager_list.append(manager)
+
+
+                    
     def reset_world_at(self, env_index: int = None):
         print("reset_world_at {}".format(env_index))
         self.update_formation_assignment_time[env_index] = time.time()
