@@ -67,7 +67,7 @@ def use_vmas_env(
     # (by default they are lists of len # of agents)
     collected_data = []  # 
 
-    for _ in range(collect_num):
+    for current_collect_num in range(collect_num):
         env = make_env(
             scenario=scenario_name,
             num_envs=num_envs,
@@ -85,10 +85,10 @@ def use_vmas_env(
         step = 0
 
 
-
+        print("current_collect_num:{}".format(current_collect_num))
         for _ in range(n_steps):
             step += 1
-            print(f"Step {step}")
+            # print(f"Step {step}")
 
             # VMAS actions can be either a list of tensors (one per agent)
             # or a dict of tensors (one entry per agent with its name as key)
@@ -167,7 +167,7 @@ def use_vmas_env(
             f"It took: {total_time}s for {n_steps} steps of {num_envs} parallel environments on device {device} "
             f"for {scenario_name} scenario."
         )
-    with open('collected_data_100.pkl', 'wb') as f:
+    with open('collected_data_random_0.pkl', 'wb') as f:
         pickle.dump(collected_data, f)
     print("Collected data saved to 'collected_data.pkl'.")
 
@@ -182,13 +182,13 @@ if __name__ == "__main__":
 
     use_vmas_env(
         scenario_name="formation_control_teacher",
-        render=True,
-        num_envs=1,
-        n_steps=1000,
+        render=False,
+        num_envs=100,
+        n_steps=500,
         save_render=False,
         random_action=True,
         continuous_actions=True,
-        collect_num=5,
+        collect_num=20,
     )
 
 
