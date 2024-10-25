@@ -5,12 +5,13 @@ from torch_geometric.data import Data, DataLoader
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import GINConv, global_mean_pool
 from torch_geometric.nn import GATConv
+from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from tqdm import tqdm
 import pickle
 import numpy as np
 
 # Load the collected data
-with open('collected_data_100.pkl', 'rb') as f:
+with open('collected_data_merged.pkl', 'rb') as f:
     collected_data = pickle.load(f)
 
 # Process the data

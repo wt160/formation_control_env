@@ -31,7 +31,10 @@ from vmas.simulator.dynamics.holonomic_with_rot import HolonomicWithRotation
 from scipy.spatial import KDTree
 if typing.TYPE_CHECKING:
     from vmas.simulator.rendering import Geom
-
+from torch_geometric.data import Data, DataLoader
+from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GINConv, global_mean_pool
+from torch_geometric.nn import GATConv
 class ObstacleManager:
     def __init__(self, obstacles):
         # Assumes obstacles is a list of torch.Tensor objects of shape [2]
@@ -126,6 +129,124 @@ class AgentHistory:
         """
         return self.history.clone()
 
+
+class GATModel(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_agents):
+        super(GATModel, self).__init__()
+        self.num_agents = num_agents
+
+        # GAT layers
+        self.conv1 = GATConv(
+            in_channels, hidden_channels, heads=8, concat=True,
+            edge_dim=1, fill_value='mean', add_self_loops=False
+        )
+        self.conv2 = GATConv(
+            hidden_channels * 8, hidden_channels, heads=8, concat=True,
+            edge_dim=1, fill_value='mean'
+        )
+        self.conv3 = GATConv(
+            hidden_channels * 8, hidden_channels, heads=8, concat=True,
+            edge_dim=1, fill_value='mean'
+        )
+
+        # Global pooling layer
+        self.pool = global_mean_pool
+
+        # Fully connected layers
+        self.fc1 = nn.Sequential(
+            nn.Linear(hidden_channels * 16, hidden_channels * 4),
+            nn.ReLU()
+            # nn.Dropout(p=0.5)  # Uncomment if needed
+        )
+        self.fc2 = nn.Linear(hidden_channels * 4, out_channels)
+
+    def forward(self, data):
+        """
+        Args:
+            data (Data, Batch, or list of Data): Single or batched PyG Data object(s) containing one or multiple graphs.
+
+        Returns:
+            predicted_positions (torch.Tensor): Predicted positions for all agents in all graphs.
+                                               Shape: [batch_size, num_agents, out_channels]
+        """
+        # Handle input types: single Data, list of Data, or Batch
+        if isinstance(data, Data):
+            data = Batch.from_data_list([data])
+        elif isinstance(data, list):
+            data = Batch.from_data_list(data)
+        elif not isinstance(data, Batch):
+            raise TypeError("Input data must be a torch_geometric.data.Data, a list of Data objects, or a Batch object.")
+
+        # Ensure data has 'batch' and 'num_graphs' attributes
+        if not hasattr(data, 'batch'):
+            # This should not happen as Batch.from_data_list adds 'batch'
+            raise AttributeError("Data object does not have 'batch' attribute.")
+
+        # Extract node features and edge information
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+
+        # GAT Layers
+        x = self.conv1(x, edge_index, edge_attr.squeeze(dim=1))
+        x = torch.relu(x)
+        x = self.conv2(x, edge_index, edge_attr)
+        x = torch.relu(x)
+        x = self.conv3(x, edge_index, edge_attr)
+        x = torch.relu(x)
+
+        # Global graph embedding
+        graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels]
+
+        # Extract agent node embeddings
+        agent_embeddings = self.extract_agent_embeddings(x, data.batch, data.num_graphs)
+        # Shape: [batch_size * num_agents, hidden_channels]
+
+        # Repeat graph embedding for each agent
+        graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)
+        # Shape: [batch_size * num_agents, hidden_channels]
+
+        # Concatenate agent embeddings with graph embeddings
+        combined = torch.cat([agent_embeddings, graph_embedding_repeated], dim=1)
+        # Shape: [batch_size * num_agents, 2 * hidden_channels]
+
+        # Fully connected layers
+        combined = self.fc1(combined)
+        combined = torch.relu(combined)
+        predicted_positions = self.fc2(combined)
+        # Shape: [batch_size * num_agents, out_channels]
+
+        # Reshape to [batch_size, num_agents, out_channels]
+        predicted_positions = predicted_positions.view(data.num_graphs, self.num_agents, -1)
+
+        return predicted_positions
+
+    def extract_agent_embeddings(self, x, batch, batch_size):
+        """
+        Extracts agent node embeddings from the batched node features.
+
+        Args:
+            x (torch.Tensor): Node features after GAT layers. Shape: [total_nodes, hidden_channels]
+            batch (torch.Tensor): Batch vector, which assigns each node to a specific graph. Shape: [total_nodes]
+            batch_size (int): Number of graphs in the batch.
+
+        Returns:
+            agent_embeddings (torch.Tensor): Agent embeddings for all graphs.
+                                            Shape: [batch_size * num_agents, hidden_channels]
+        """
+        agent_node_indices = []
+        for graph_idx in range(batch_size):
+            # Find node indices for the current graph
+            node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+            # Ensure there are enough nodes for agents
+            if node_indices.size(0) < self.num_agents:
+                raise ValueError(f"Graph {graph_idx} has fewer nodes ({node_indices.size(0)}) than num_agents ({self.num_agents}).")
+            # Take the first `num_agents` nodes as agent nodes
+            agent_nodes = node_indices[:self.num_agents]
+            agent_node_indices.append(agent_nodes)
+
+        # Concatenate all agent node indices
+        agent_node_indices = torch.cat(agent_node_indices, dim=0)
+        agent_embeddings = x[agent_node_indices]  # Shape: [batch_size * num_agents, hidden_channels]
+        return agent_embeddings
 class Scenario(BaseScenario):
     def make_world(self, batch_dim: int, device: torch.device, **kwargs):
         self.plot_grid = True
@@ -141,7 +262,7 @@ class Scenario(BaseScenario):
         self.observe_all_goals = kwargs.get("observe_all_goals", True)
 
         self.lidar_range = kwargs.get("lidar_range", 1.8)
-        self.agent_radius = kwargs.get("agent_radius", 0.35)
+        self.agent_radius = kwargs.get("agent_radius", 0.15)
         self.comms_range = kwargs.get("comms_range", 0)
 
         self.shared_rew = kwargs.get("shared_rew", False)
@@ -242,13 +363,13 @@ class Scenario(BaseScenario):
         world.add_landmark(self.formation_center)
         world.add_landmark(self.leader_robot)
 
-        self.obstacle_pattern = 1
+        self.obstacle_pattern = 2
         self.create_obstacles(self.obstacle_pattern, world)
 
         def detect_obstacles(x):
             return x.name.startswith("obs_") or x.name.startswith("agent_") or x.name.startswith("wall")
 
-
+        self.agent_target_pos_global = torch.zeros((5,2))
 
 
         #add leader agent
@@ -373,6 +494,19 @@ class Scenario(BaseScenario):
             history_length=history_length,
             device=device
         )
+
+        num_agents=5
+        in_channels = 3
+        hidden_channels = 64
+        out_channels = 2  # Assuming 2D positions
+
+        # Initialize the model, loss function, and optimizer
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.formation_model = GATModel(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels, num_agents=num_agents).to(device)
+        formation_control_policy_checkpoint = "/home/admin123/VectorizedMultiAgentSimulator/vmas/examples/best_gnn_model.pth"
+        self.formation_model.load_state_dict(torch.load(formation_control_policy_checkpoint))
+
+
         return world
 
     
@@ -635,7 +769,6 @@ class Scenario(BaseScenario):
             return positions
         
         def get_pos(i):
-
             if obstacle_pattern == 0:
                 # Randomly located obstacles
                 pos = torch.tensor(
@@ -683,7 +816,7 @@ class Scenario(BaseScenario):
                     for idx, obs in enumerate(self.obstacles):
                         obs.set_pos(line_segments[idx], batch_index=env_index)
                                 
-                    print("obs num:{}".format(len(self.obstacles)))    
+                                
                                 
                     
                     
@@ -957,7 +1090,7 @@ class Scenario(BaseScenario):
                             self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
                 # for idx, obs in enumerate(self.obstacles):
                 #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                print("obs num:{}".format(len(self.obstacles)))
+
 
                 self.obstacle_manager_list = []
                 for d in range(self.world.batch_dim):
@@ -1215,6 +1348,7 @@ class Scenario(BaseScenario):
     def process_action(self, agent: Agent):
         self.velocity_limit = 0.03  # Adjusted speed for smoother movement
         is_first = agent == self.world.agents[0]
+        
         if is_first:
             current_positions = torch.stack([agent.state.pos for agent in self.world.agents])  # [num_agents, batch_dim, 2]
             current_positions = current_positions.permute(1, 0, 2)  # [batch_dim, num_agents, 2]
@@ -1362,8 +1496,14 @@ class Scenario(BaseScenario):
                     )
 
 
-                
-        
+            upper_policy_input = self.get_upper_policy_input()
+            formation_policy_output = self.formation_model(upper_policy_input[0].to(self.device))
+            print("local agent_target_pos_global:{}".format(formation_policy_output))
+            self.agent_target_pos_global = self.transform_local_to_global(formation_policy_output, self.leader_robot.state.pos, self.leader_robot.state.rot, self.device)
+            print("agent_target_pos_global:{}".format(self.agent_target_pos_global))
+            self.agent_target_pos_global = self.agent_target_pos_global.squeeze(dim=0)
+            print("agent_target_pos_global shape:{}".format(self.agent_target_pos_global.shape))
+
         # angles = [-135/180.0*math.pi, 135/180.0*math.pi, -135/180.0*math.pi,  135/180.0*math.pi]
         # dists = [-0.8, -0.8, -1.6, -1.6]
         angles = [0.0, -45/180.0*math.pi, 45/180.0*math.pi, -45/180.0*math.pi,  45/180.0*math.pi]
@@ -1389,17 +1529,19 @@ class Scenario(BaseScenario):
                     formation_angle = self.formation_center_pos[:, 2] + angle  # Shape [10, 1] + scalar
 
                     # Update the goals using torch.cos and torch.sin
-                    self.formation_goals[i][:, 0] = self.formation_center_pos[:, 0] + torch.cos(formation_angle) * dist
-                    self.formation_goals[i][:, 1] = self.formation_center_pos[:, 1] + torch.sin(formation_angle) * dist
+                    if i == 0:
+                        self.formation_goals[i][:, 0] = self.formation_center_pos[:, 0] + torch.cos(formation_angle) * dist
+                        self.formation_goals[i][:, 1] = self.formation_center_pos[:, 1] + torch.sin(formation_angle) * dist
+                    else:
+                        self.formation_goals[i][:, 0] = self.agent_target_pos_global[i,0]
+                        self.formation_goals[i][:, 1] = self.agent_target_pos_global[i,1]
+
+
                     # self.formation_goals[i][:, 0] = self.formation_center_pos[:, 0] + math.cos(self.formation_center_pos[:, 2] + angles[i]) * dists[i]
                     # self.formation_goals[i][:, 1] = self.formation_center_pos[:, 1] + math.sin(self.formation_center_pos[:, 2] + angles[i]) * dists[i]
                     self.formation_normal_width = math.sin(45/180.0*math.pi)*0.5* 4
                     agent.set_vel(
                             torch.stack([3*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 3*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
-                        batch_index=None,
-                    )
-                    agent.set_ang_vel(
-                            torch.stack([3*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
                         batch_index=None,
                     )
                     # agent.set_vel(
@@ -2348,14 +2490,12 @@ class Scenario(BaseScenario):
         
         nominal_formation_category = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [5, 1] with category 0
         nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
-        if near_obstacles_in_leader_frame is not None:
+        if near_obstacles_in_leader_frame != None:
             # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
         
-            near_obstacles_in_leader_frame_add_dim = torch.zeros((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  
+        
             near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
-            
-            near_obstacles_in_leader_frame_tensor = torch.cat((near_obstacles_in_leader_frame, near_obstacles_in_leader_frame_add_dim), dim=1)
-            near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame_tensor, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
+            near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
             num_obstacles = near_obstacles_in_leader_frame.size(0)
         
 
@@ -2377,7 +2517,7 @@ class Scenario(BaseScenario):
         num_agents = nominal_formation_tensor.size(0)
         
         # Connect each nominal formation agent with near obstacles
-        if near_obstacles_in_leader_frame is not None:
+        if near_obstacles_in_leader_frame != None:
             for agent_index in range(num_agents):
                 agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
                 for obstacle_index in range(num_obstacles):
@@ -2387,9 +2527,8 @@ class Scenario(BaseScenario):
                         # Add edges from agent to obstacle
                         edge_index.append([agent_index, num_agents + obstacle_index])  # Agent to obstacle
                         edge_index.append([num_agents + obstacle_index, agent_index])  # Obstacle to agent
-                        edge_attr.append([distance.item()])  # Edge type 1 for agent-obstacle
-                        edge_attr.append([distance.item()])  # Edge type 1 for agent-obstacle
-
+                        edge_attr.append([distance])  # Edge type 1 for agent-obstacle
+                        edge_attr.append([distance])
         # Connect each pair of nominal formation agents
         for i in range(num_agents):
             for j in range(i + 1, num_agents):
@@ -2403,14 +2542,11 @@ class Scenario(BaseScenario):
                     # print("add edges index")
                     edge_index.append([i,  j])  # Agent to obstacle
                     edge_index.append([j, i])  # Obstacle to agent
-                    edge_attr.append([distance.item()])  # Edge type 1 for agent-obstacle
-                    edge_attr.append([distance.item()])
-        if edge_index:
-            edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # [2, num_edges]
-            edge_attr = torch.tensor(edge_attr, dtype=torch.float)  # [num_edges, 1]
-        else:
-            edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
-            edge_attr = torch.empty((0, 1), dtype=torch.float, device=self.device)
+                    edge_attr.append([distance])  # Edge type 1 for agent-obstacle
+                    edge_attr.append([distance])
+        # Convert edge index and edge attributes to tensors
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()  # Shape: [2, num_edges]
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float)  # Shape: [num_edges, 1]
 
         # Create the PyTorch Geometric data object
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
@@ -2418,104 +2554,77 @@ class Scenario(BaseScenario):
         return data
 
 
-    def data_list_to_single_tensor(self, data_list, max_obstacles, num_node_features, num_edge_features):
-        """
-        Converts a list of torch_geometric.Data objects into a single tensor of shape (batch_size, num_agents, feature_length).
-        All graph data (agents + obstacles) is serialized into the 0th agent's feature vector.
-        
-        Args:
-            data_list (List[Data]): List of Data objects.
-            max_obstacles (int): Maximum number of obstacles to consider per graph.
-            num_node_features (int): Number of features per node (excluding category).
-            num_edge_features (int): Number of features per edge.
-        
-        Returns:
-            torch.Tensor: Serialized tensor of shape (batch_size, num_agents, feature_length).
-        """
-        batch_size = len(data_list)
-        num_agents = self.n_agents  # Assuming all graphs have the same number of agents
-        device = data_list[0].x.device
-        
-        # Feature length calculation for the 0th agent:
-        # - Node features for agents + obstacles
-        # - Edge indices and edge attributes
-        # Assume we serialize all node features sequentially, followed by edge information.
-        # For simplicity, store node features and edge information in a flattened manner.
-        
-        # Calculate maximum number of nodes (agents + obstacles)
-        max_nodes = num_agents + max_obstacles  # Agents + Obstacles
-        max_edges = num_agents * max_obstacles * 2 + (num_agents * (num_agents - 1)) * 2  # Approximate
-        
-        # Define feature_length:
-        # - Node features: max_nodes * num_node_features
-        # - Edge indices: max_edges * 2
-        # - Edge attributes: max_edges * num_edge_features
-        # Total feature_length = max_nodes*num_node_features + max_edges*(2 + num_edge_features)
-        
-        feature_length = max_nodes * num_node_features + max_edges * (2 + num_edge_features)
-        
-        # Initialize the serialized tensor
-        serialized_tensor = torch.zeros((batch_size, num_agents, feature_length), dtype=torch.float, device=device)
-        
-        for batch_idx, data in enumerate(data_list):
-            # Extract node features
-            x = data.x  # [num_agents + num_obstacles, num_node_features + 1] (including category)
-            # Split node features and category
-            node_features = x[:, :num_node_features]  # [total_nodes, num_node_features]
-            categories = x[:, num_node_features].long()  # [total_nodes]
-            
-            # Extract edge indices and edge attributes
-            edge_index = data.edge_index  # [2, num_edges]
-            edge_attr = data.edge_attr  # [num_edges, num_edge_features]
-            
-            # Prepare node features
-            total_nodes = node_features.size(0)
-            if total_nodes > max_nodes:
-                raise ValueError(f"Graph {batch_idx} has more nodes ({total_nodes}) than max_nodes ({max_nodes}).")
-            
-            # Pad node features to max_nodes
-            padded_node_features = torch.zeros((max_nodes, num_node_features), dtype=torch.float, device=device)
-            padded_node_features[:total_nodes] = node_features  # Pad remaining with zeros
-            
-            # Flatten node features
-            flattened_node_features = padded_node_features.view(-1)  # [max_nodes * num_node_features]
-            
-            # Prepare edge information
-            num_edges = edge_index.size(1)
-            if num_edges > max_edges:
-                raise ValueError(f"Graph {batch_idx} has more edges ({num_edges}) than max_edges ({max_edges}).")
-            
-            # Pad edge_index and edge_attr
-            padded_edge_index = torch.zeros((max_edges, 2), dtype=torch.float, device=device)
-            padded_edge_attr = torch.zeros((max_edges, num_edge_features), dtype=torch.float, device=device)
-            
-            padded_edge_index[:num_edges] = edge_index.t().float()  # [max_edges, 2]
-            if edge_attr is not None and edge_attr.size(0) > 0:
-                padded_edge_attr[:num_edges] = edge_attr  # [max_edges, num_edge_features]
-            
-            # Flatten edge information
-            flattened_edge_index = padded_edge_index.view(-1)  # [max_edges * 2]
-            flattened_edge_attr = padded_edge_attr.view(-1)  # [max_edges * num_edge_features]
-            
-            # Concatenate all serialized data
-            feature_vector = torch.cat([flattened_node_features, flattened_edge_index, flattened_edge_attr], dim=0)  # [feature_length]
-            
-            # Assign to the 0th agent's feature vector
-            serialized_tensor[batch_idx, 0] = feature_vector
-            
-            # Assign other agents' own node features (excluding obstacles)
-            for agent_idx in range(1, num_agents):
-                agent_feature = node_features[agent_idx].view(-1)  # [num_node_features]
-                # Pad the remaining feature_length - num_node_features with zeros
-                agent_feature_padded = torch.zeros(feature_length, dtype=torch.float, device=device)
-                agent_feature_padded[:num_node_features] = agent_feature
-                serialized_tensor[batch_idx, agent_idx] = agent_feature_padded
-        
-        return serialized_tensor  # Shape: [batch_size, num_agents, feature_length]
-
 
     def set_last_policy_output(self, output):
         self.last_policy_output = copy.deepcopy(output)
+
+
+    def get_upper_policy_input(self):
+        graph_list = []
+        agent_num = len(self.world.agents)
+        nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 2), device=self.device)
+        
+        # Define nominal positions for agents (assuming 5 agents)
+        # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
+        # nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
+        nominal_positions_x = [0.0, -0.5534992, -0.5534992, -0.95179105, -0.95179105]
+        nominal_positions_y = [0.0, 0.35284618, -0.35284618, 0.7946659, -0.7946659]
+        for i, nomi_agent in enumerate(self.world.agents):
+            nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
+            nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
+        previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
+
+
+        for d in range(self.world.batch_dim):
+            obstacle_manager = self.obstacle_manager_list[d]
+            leader_pos = self.leader_robot.state.pos[d, :]  # Shape: [2]
+            leader_rot = self.leader_robot.state.rot[d]      # Scalar (radians)
+            
+            agent_prev_positions = previous_positions[d, :, :, :] 
+            # Transform previous positions relative to leader's frame
+            # Translation: agent_prev_positions - leader_pos
+            translated_prev_positions = agent_prev_positions - leader_pos.unsqueeze(0).unsqueeze(1)  # [agent_num, history_length, 2]
+            
+            # Rotation: Apply rotation matrix
+            cos_theta = torch.cos(leader_rot)
+            sin_theta = torch.sin(leader_rot)
+            # print("sin_theta shape:{}".format(sin_theta.shape))
+            rotation_matrix = torch.tensor([[cos_theta, -sin_theta],
+                                            [sin_theta, cos_theta]], device=self.device)  # [2, 2]
+            
+            # Apply rotation to each agent's previous positions
+            # Reshape for batch matrix multiplication
+            agent_prev_positions_flat = translated_prev_positions.view(-1, 2)  # [agent_num * history_length, 2]
+            transformed_prev_positions = torch.matmul(agent_prev_positions_flat, rotation_matrix)  # [agent_num * history_length, 2]
+            transformed_prev_positions = transformed_prev_positions.view(agent_num, -1, 2)  # [agent_num, history_length, 2]
+            
+            # Retrieve transformed previous positions for all agents
+            transformed_prev_positions_batch = transformed_prev_positions  # [agent_num, history_length, 2]
+
+
+
+            near_obstacles = obstacle_manager.get_near_obstacles(leader_pos.cpu(), 1.5)
+            # near_obstacles: list of tensors, each of shape [2]
+            
+            if len(near_obstacles) != 0:
+                near_obstacles_tensor = torch.stack(near_obstacles)  # Shape: [num_obstacles, 2]
+                
+                # Translate obstacles relative to leader's position
+                translated_obstacles = near_obstacles_tensor - leader_pos  # Shape: [num_obstacles, 2]
+                
+                
+                # Apply rotation: (num_obstacles, 2) x (2, 2) -> (num_obstacles, 2)
+                near_obstacles_in_leader_frame = torch.matmul(translated_obstacles , rotation_matrix)
+                
+                # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame, transformed_prev_positions_batch)
+                current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame)
+
+            else:
+                # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None, transformed_prev_positions_batch)
+                current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None)
+            
+            graph_list.append(current_graph)
+        return graph_list
 
     def observation(self, agent: Agent):
 
@@ -2526,115 +2635,97 @@ class Scenario(BaseScenario):
         current_agent_index = self.world.agents.index(agent)
         graph_list = []
         
-        if current_agent_index == 0:
-            agent_num = len(self.world.agents)
-            nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 3), device=self.device)
+        # if current_agent_index == 0:
+            # agent_num = len(self.world.agents)
+            # nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 2), device=self.device)
             
-            # Define nominal positions for agents (assuming 5 agents)
-            # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
-            # nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
-            nominal_positions_x = [0.0, -0.5534992, -0.5534992, -0.95179105, -0.95179105]
-            nominal_positions_y = [0.0, 0.35284618, -0.35284618, 0.7946659, -0.7946659]
-            for i, nomi_agent in enumerate(self.world.agents):
-                nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
-                nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
-                nominal_formation_tensor[:, i, 2] = 0.0
-            previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
+            # # Define nominal positions for agents (assuming 5 agents)
+            # # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
+            # # nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
+            # nominal_positions_x = [0.0, -0.5534992, -0.5534992, -0.95179105, -0.95179105]
+            # nominal_positions_y = [0.0, 0.35284618, -0.35284618, 0.7946659, -0.7946659]
+            # for i, nomi_agent in enumerate(self.world.agents):
+            #     nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
+            #     nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
+            # previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
 
 
-            for d in range(self.world.batch_dim):
-                obstacle_manager = self.obstacle_manager_list[d]
-                leader_pos = self.leader_robot.state.pos[d, :]  # Shape: [2]
-                leader_rot = self.leader_robot.state.rot[d]      # Scalar (radians)
+            # for d in range(self.world.batch_dim):
+            #     obstacle_manager = self.obstacle_manager_list[d]
+            #     leader_pos = self.leader_robot.state.pos[d, :]  # Shape: [2]
+            #     leader_rot = self.leader_robot.state.rot[d]      # Scalar (radians)
                 
-                agent_prev_positions = previous_positions[d, :, :, :] 
-                # Transform previous positions relative to leader's frame
-                # Translation: agent_prev_positions - leader_pos
-                translated_prev_positions = agent_prev_positions - leader_pos.unsqueeze(0).unsqueeze(1)  # [agent_num, history_length, 2]
+            #     agent_prev_positions = previous_positions[d, :, :, :] 
+            #     # Transform previous positions relative to leader's frame
+            #     # Translation: agent_prev_positions - leader_pos
+            #     translated_prev_positions = agent_prev_positions - leader_pos.unsqueeze(0).unsqueeze(1)  # [agent_num, history_length, 2]
                 
-                # Rotation: Apply rotation matrix
-                cos_theta = torch.cos(leader_rot)
-                sin_theta = torch.sin(leader_rot)
-                # print("sin_theta shape:{}".format(sin_theta.shape))
-                rotation_matrix = torch.tensor([[cos_theta, -sin_theta],
-                                                [sin_theta, cos_theta]], device=self.device)  # [2, 2]
+            #     # Rotation: Apply rotation matrix
+            #     cos_theta = torch.cos(leader_rot)
+            #     sin_theta = torch.sin(leader_rot)
+            #     # print("sin_theta shape:{}".format(sin_theta.shape))
+            #     rotation_matrix = torch.tensor([[cos_theta, -sin_theta],
+            #                                     [sin_theta, cos_theta]], device=self.device)  # [2, 2]
                 
-                # Apply rotation to each agent's previous positions
-                # Reshape for batch matrix multiplication
-                agent_prev_positions_flat = translated_prev_positions.view(-1, 2)  # [agent_num * history_length, 2]
-                transformed_prev_positions = torch.matmul(agent_prev_positions_flat, rotation_matrix)  # [agent_num * history_length, 2]
-                transformed_prev_positions = transformed_prev_positions.view(agent_num, -1, 2)  # [agent_num, history_length, 2]
+            #     # Apply rotation to each agent's previous positions
+            #     # Reshape for batch matrix multiplication
+            #     agent_prev_positions_flat = translated_prev_positions.view(-1, 2)  # [agent_num * history_length, 2]
+            #     transformed_prev_positions = torch.matmul(agent_prev_positions_flat, rotation_matrix)  # [agent_num * history_length, 2]
+            #     transformed_prev_positions = transformed_prev_positions.view(agent_num, -1, 2)  # [agent_num, history_length, 2]
                 
-                # Retrieve transformed previous positions for all agents
-                transformed_prev_positions_batch = transformed_prev_positions  # [agent_num, history_length, 2]
+            #     # Retrieve transformed previous positions for all agents
+            #     transformed_prev_positions_batch = transformed_prev_positions  # [agent_num, history_length, 2]
 
 
 
-                near_obstacles = obstacle_manager.get_near_obstacles(leader_pos.cpu(), 1.5)
-                # near_obstacles: list of tensors, each of shape [2]
-                # if len(near_obstacles) > 50:
-                    # print("something is wrong, obs num > 50")
-                if len(near_obstacles) != 0:
-                    near_obstacles_tensor = torch.stack(near_obstacles)  # Shape: [num_obstacles, 2]
+            #     near_obstacles = obstacle_manager.get_near_obstacles(leader_pos.cpu(), 1.5)
+            #     # near_obstacles: list of tensors, each of shape [2]
+                
+            #     if len(near_obstacles) != 0:
+            #         near_obstacles_tensor = torch.stack(near_obstacles)  # Shape: [num_obstacles, 2]
                     
-                    # Translate obstacles relative to leader's position
-                    translated_obstacles = near_obstacles_tensor - leader_pos  # Shape: [num_obstacles, 2]
+            #         # Translate obstacles relative to leader's position
+            #         translated_obstacles = near_obstacles_tensor - leader_pos  # Shape: [num_obstacles, 2]
                     
                     
-                    # Apply rotation: (num_obstacles, 2) x (2, 2) -> (num_obstacles, 2)
-                    near_obstacles_in_leader_frame = torch.matmul(translated_obstacles , rotation_matrix)
+            #         # Apply rotation: (num_obstacles, 2) x (2, 2) -> (num_obstacles, 2)
+            #         near_obstacles_in_leader_frame = torch.matmul(translated_obstacles , rotation_matrix)
                     
-                    # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame, transformed_prev_positions_batch)
-                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame)
+            #         # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame, transformed_prev_positions_batch)
+            #         current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame)
 
-                else:
-                    # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None, transformed_prev_positions_batch)
-                    current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None)
+            #     else:
+            #         # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None, transformed_prev_positions_batch)
+            #         current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], None)
                 
-                graph_list.append(current_graph)
+            #     graph_list.append(current_graph)
+
+            # return self.data_list_to_tensors(graph_list)
 
 
-            max_obstacles =100  # Define this attribute in your class
-            num_node_features = 3  # Assuming x and y coordinates
-            num_edge_features = 1  # Assuming distance as edge attribute
-            num_agents = agent_num  # Number of agents per graph
 
-            if graph_list:
-                serialized_tensor = self.data_list_to_single_tensor(
-                    graph_list, 
-                    max_obstacles=max_obstacles, 
-                    num_node_features=num_node_features, 
-                    num_edge_features=num_edge_features
-                )
-            else:
-                # Handle case with no graphs
-                feature_length = (num_agents + max_obstacles) * num_node_features + max_obstacles * 2 + max_obstacles * num_edge_features
-                serialized_tensor = torch.zeros((self.world.batch_dim, num_agents, feature_length), device=self.device)
-            
-            return serialized_tensor  # Shape: [batch_size, num_agents, feature_length]
+            # pass
+        # else:
+        relative_to_other_robots_pose = []
+        relative_to_other_formation_pose = []
 
+        for i in range(len(self.world.agents)):
+            # formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
+            relative_to_other_formation_pose.append(self.formation_goals_landmark[i].state.pos - agent.state.pos)
         
-        else:
-            relative_to_other_robots_pose = []
-            relative_to_other_formation_pose = []
 
-            for i in range(len(self.world.agents)):
-                # formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
-                relative_to_other_formation_pose.append(self.formation_goals_landmark[i].state.pos - agent.state.pos)
-            
+        relative_to_leader_pose = [self.leader_robot.state.pos - agent.state.pos]
+    
+        for a in self.world.agents:
+            if a != agent:
+                relative_to_other_robots_pose.append(a.state.pos - agent.state.pos)
+    
+        observation_tensor = torch.cat(
+            relative_to_leader_pose + relative_to_other_robots_pose  ,
+            dim=-1)
+        # print("agent {} obs:{} shape:{}".format(current_agent_index, observation_tensor, observation_tensor.shape))
 
-            relative_to_leader_pose = [self.leader_robot.state.pos - agent.state.pos]
-        
-            for a in self.world.agents:
-                if a != agent:
-                    relative_to_other_robots_pose.append(a.state.pos - agent.state.pos)
-        
-            observation_tensor = torch.cat(
-                relative_to_leader_pose + relative_to_other_robots_pose  ,
-                dim=-1)
-            # print("agent {} obs:{} shape:{}".format(current_agent_index, observation_tensor, observation_tensor.shape))
-
-            return observation_tensor
+        return observation_tensor
 
     
       
@@ -2668,6 +2759,45 @@ class Scenario(BaseScenario):
             # print("No True entries found.")
         return done_status
 
+    def transform_local_to_global(self, optimized_target_pos, leader_robot_pos, leader_robot_rot, device):
+        """
+        Transforms positions from the local frame to the global frame.
+
+        Args:
+            optimized_target_pos (torch.Tensor): Positions in the local frame. Shape: [batch_dim, 2] or [2]
+            leader_robot_pos (torch.Tensor): Leader robot's position in the global frame. Shape: [batch_dim, 2] or [2]
+            leader_robot_rot (torch.Tensor): Leader robot's rotation angle (in radians). Shape: [batch_dim] or scalar
+            device (torch.device): Device to perform computations on.
+
+        Returns:
+            torch.Tensor: Positions in the global frame. Shape: [batch_dim, 2] or [2]
+        """
+        # Ensure inputs are on the correct device
+        optimized_target_pos = optimized_target_pos.to(device)
+        leader_robot_pos = leader_robot_pos.to(device)
+        leader_robot_rot = leader_robot_rot.to(device)
+
+        # Step 1: Compute Inverse Rotation Matrices
+        cos_theta = torch.cos(leader_robot_rot).unsqueeze(-1)  # Shape: [batch_dim, 1] or [1, 1]
+        sin_theta = torch.sin(leader_robot_rot).unsqueeze(-1)  # Shape: [batch_dim, 1] or [1, 1]
+
+        # Original rotation matrices:
+        # [cos(theta)  sin(theta)]
+        # [-sin(theta) cos(theta)]
+        rotation_matrices = torch.cat([cos_theta, sin_theta, -sin_theta, cos_theta], dim=1).reshape(-1, 2, 2)  # Shape: [batch_dim, 2, 2] or [1, 2, 2]
+        rotation_matrices_inv = rotation_matrices.transpose(1, 2)  # Inverse rotation for orthonormal matrices
+
+        # Step 2: Apply Inverse Rotation
+        # Use torch.matmul instead of torch.bmm for flexibility
+        # optimized_target_pos: [batch_dim, 2] or [2]
+        # optimized_target_pos.unsqueeze(-1): [batch_dim, 2, 1] or [2, 1]
+        translated_pos_global = torch.matmul(rotation_matrices_inv, optimized_target_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2] or [2]
+
+        # Step 3: Apply Inverse Translation
+        # agent_pos_global = translated_pos_global + leader_robot_pos
+        agent_pos_global = translated_pos_global + leader_robot_pos  # Shape: [batch_dim, 2] or [2]
+
+        return agent_pos_global
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         """
         Collects and returns information for the given agent, including optimized target positions
@@ -2684,7 +2814,7 @@ class Scenario(BaseScenario):
         
         # if current_agent_index == 0:
         #     agent_num = len(self.world.agents)
-        #     nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 3), device=self.device)
+        #     nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 2), device=self.device)
             
         #     # Define nominal positions for agents (assuming 5 agents)
         #     # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
@@ -2694,7 +2824,6 @@ class Scenario(BaseScenario):
         #     for i, nomi_agent in enumerate(self.world.agents):
         #         nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
         #         nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
-        #         nominal_formation_tensor[:, i, 2] = 0.0
         #     previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
 
 
@@ -2740,7 +2869,6 @@ class Scenario(BaseScenario):
         #             near_obstacles_in_leader_frame = torch.matmul(translated_obstacles , rotation_matrix)
                     
         #             # current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame, transformed_prev_positions_batch)
-
         #             current_graph = self.single_graph_from_data(nominal_formation_tensor[d, :, :], near_obstacles_in_leader_frame)
 
         #         else:
@@ -2760,7 +2888,7 @@ class Scenario(BaseScenario):
 
         # Translate agent positions relative to leader's position
         translated_agent_pos = agent.state.pos - self.leader_robot.state.pos  # Shape: [batch_dim, 2]
-        translated_agent_rot = agent.state.rot - self.leader_robot.state.rot
+
         # Rotate agent positions into leader's frame
         # Assume self.leader_robot.state.rot is a tensor of shape [batch_dim]
         cos_theta = torch.cos(self.leader_robot.state.rot).unsqueeze(-1)  # Shape: [batch_dim, 1]
@@ -2771,15 +2899,14 @@ class Scenario(BaseScenario):
         
         # Apply rotation: [batch_dim, 2, 2] x [batch_dim, 2, 1] -> [batch_dim, 2, 1]
         optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2]
-        optimized_target_pose = torch.cat([optimized_target_pos, translated_agent_rot], dim=1)
-        # print("optimized_target_pose:{}".format(optimized_target_pose.shape))
+
         return {
             # "pos_rew": self.pos_rew if self.shared_rew else agent.pos_rew,
             # "final_rew": self.final_rew,
             # "agent_collisions": agent.agent_collision_rew,
             # "formation_goal": agent.goal.state.pos,
             # "formation_main_rew":self.formation_maintain_rew,
-            "optimized_target_pos": optimized_target_pose,  # Transformed to leader's frame
+            "optimized_target_pos": optimized_target_pos,  # Transformed to leader's frame
             # "graph_list": graph_list,
         }
     

@@ -367,8 +367,14 @@ class Environment(TorchVectorizedObject):
                 }
             )
         else:
-            raise NotImplementedError(
-                f"Invalid type of observation {obs} for agent {agent.name}"
+            # raise NotImplementedError(
+            #     f"Invalid type of observation {obs} for agent {agent.name}"
+            # )
+            return spaces.Box(
+                low=-np.float32("inf"),
+                high=np.float32("inf"),
+                shape=(len(obs[0]),),
+                dtype=np.float32,
             )
 
     def get_random_action(self, agent: Agent) -> torch.Tensor:

@@ -86,90 +86,92 @@ def use_vmas_env(
 
 
         print("current_collect_num:{}".format(current_collect_num))
-        for _ in range(n_steps):
-            step += 1
-            # print(f"Step {step}")
+        with torch.no_grad():
+            for _ in range(n_steps):
+                step += 1
+                # print(f"Step {step}")
 
-            # VMAS actions can be either a list of tensors (one per agent)
-            # or a dict of tensors (one entry per agent with its name as key)
-            # Both action inputs can be used independently of what type of space its chosen
-            dict_actions = random.choice([True, False])
+                # VMAS actions can be either a list of tensors (one per agent)
+                # or a dict of tensors (one entry per agent with its name as key)
+                # Both action inputs can be used independently of what type of space its chosen
+                dict_actions = random.choice([True, False])
 
-            actions = {} if dict_actions else []
-            for agent in env.agents:
-                # print("agent:{}".format(agent))
+                actions = {} if dict_actions else []
+                for agent in env.agents:
+                    # print("agent:{}".format(agent))
+                    
+                        # action = env.get_random_action(agent)
+                    action = torch.zeros((agent.batch_dim, 3))
+                    if dict_actions:
+                        actions.update({agent.name: action})
+                    else:
+                        actions.append(action)
+                # print("actions:{}".format(actions))
+                obs, rews, dones, info = env.step(actions)
+                # print("obs:{}".format(obs))
+                # print("info:{}".format(info))
+                agent_0 = env.agents[0]
+                agent_0_name = agent_0.name
+                agent_0_obs = obs[agent_0_name]
+
+                # graph_list = agent_0_obs.get('graph_list', [])
+                optimized_target_pos = {}
+
+                # Process graph_list to make it serializable
+                # serializable_graph_list = []
+
+                # for graph in graph_list:
+                #     # Extract data from the PyG Data object
+                #     x = graph.x.cpu().numpy()  # Node features
+                #     edge_index = graph.edge_index.cpu().numpy()  # Edge indices
+                #     if hasattr(graph, 'edge_attr') and graph.edge_attr is not None:
+                #         edge_attr = graph.edge_attr.cpu().numpy()  # Edge attributes
+                #     else:
+                #         edge_attr = None
+
+                #     graph_data = {
+                #         'x': x,
+                #         'edge_index': edge_index,
+                #         'edge_attr': edge_attr,
+                #     }
+                #     serializable_graph_list.append(graph_data)
+
+                # Collect optimized_target_pos for all agents
+                for agent in env.agents:
+                    agent_name = agent.name
+                    agent_info = info[agent_name]
+                    agent_pos = agent_info['optimized_target_pos'].cpu().detach().numpy()
+                    optimized_target_pos[agent_name] = agent_pos
+
+                # Build data point
                 
-                    # action = env.get_random_action(agent)
-                action = torch.zeros((agent.batch_dim, 3))
-                if dict_actions:
-                    actions.update({agent.name: action})
-                else:
-                    actions.append(action)
-            # print("actions:{}".format(actions))
-            obs, rews, dones, info = env.step(actions)
-            # print("obs:{}".format(obs))
-            # print("info:{}".format(info))
-            agent_0 = env.agents[0]
-            agent_0_name = agent_0.name
-            agent_0_info = info[agent_0_name]
-
-            graph_list = agent_0_info.get('graph_list', [])
-            optimized_target_pos = {}
-
-            # Process graph_list to make it serializable
-            serializable_graph_list = []
-
-            for graph in graph_list:
-                # Extract data from the PyG Data object
-                x = graph.x.cpu().numpy()  # Node features
-                edge_index = graph.edge_index.cpu().numpy()  # Edge indices
-                if hasattr(graph, 'edge_attr') and graph.edge_attr is not None:
-                    edge_attr = graph.edge_attr.cpu().numpy()  # Edge attributes
-                else:
-                    edge_attr = None
-
-                graph_data = {
-                    'x': x,
-                    'edge_index': edge_index,
-                    'edge_attr': edge_attr,
+                data_point = {
+                    'graph_tensor': agent_0_obs.detach().cpu(),
+                    'optimized_target_pos': {agent_name: agent_pos for agent_name, agent_pos in optimized_target_pos.items()},
                 }
-                serializable_graph_list.append(graph_data)
+                # Append to collected data
+                collected_data.append(data_point)
 
-            # Collect optimized_target_pos for all agents
-            for agent in env.agents:
-                agent_name = agent.name
-                agent_info = info[agent_name]
-                agent_pos = agent_info['optimized_target_pos'].cpu().numpy()
-                optimized_target_pos[agent_name] = agent_pos
-
-            # Build data point
-            data_point = {
-                'graph_list': serializable_graph_list,
-                'optimized_target_pos': optimized_target_pos,
-            }
-
-            # Append to collected data
-            collected_data.append(data_point)
-
-            # print("obs:{}".format(obs))
-            # print("info:{}".format(info))
-            if render:
-                frame = env.render(
-                    mode="rgb_array",
-                    agent_index_focus=None,  # Can give the camera an agent index to focus on
-                    visualize_when_rgb=visualize_render,
-                )
-                if save_render:
-                    frame_list.append(frame)
+                # print("obs:{}".format(obs))
+                # print("info:{}".format(info))
+                if render:
+                    frame = env.render(
+                        mode="rgb_array",
+                        agent_index_focus=None,  # Can give the camera an agent index to focus on
+                        visualize_when_rgb=visualize_render,
+                    )
+                    if save_render:
+                        frame_list.append(frame)
 
         total_time = time.time() - init_time
         print(
             f"It took: {total_time}s for {n_steps} steps of {num_envs} parallel environments on device {device} "
             f"for {scenario_name} scenario."
         )
-    with open('collected_data_random_0.pkl', 'wb') as f:
-        pickle.dump(collected_data, f)
-    print("Collected data saved to 'collected_data.pkl'.")
+
+        with open('collected_data_random_500_steps_100_env.pkl', 'wb') as f:
+            pickle.dump(collected_data, f)
+        print("Collected data saved to 'collected_data.pkl'.")
 
     if render and save_render:
         save_video(scenario_name, frame_list, fps=1 / env.scenario.world.dt)
