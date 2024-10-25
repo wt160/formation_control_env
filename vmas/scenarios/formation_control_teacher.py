@@ -2455,7 +2455,7 @@ class Scenario(BaseScenario):
         feature_length = max_nodes * num_node_features + max_edges * (2 + num_edge_features)
         
         # Initialize the serialized tensor
-        serialized_tensor = torch.zeros((batch_size, num_agents, feature_length), dtype=torch.float, device=device)
+        serialized_tensor = torch.zeros((batch_size, feature_length), dtype=torch.float, device=device)
         
         for batch_idx, data in enumerate(data_list):
             # Extract node features
@@ -2501,15 +2501,15 @@ class Scenario(BaseScenario):
             feature_vector = torch.cat([flattened_node_features, flattened_edge_index, flattened_edge_attr], dim=0)  # [feature_length]
             
             # Assign to the 0th agent's feature vector
-            serialized_tensor[batch_idx, 0] = feature_vector
+            serialized_tensor[batch_idx, :] = feature_vector
             
             # Assign other agents' own node features (excluding obstacles)
-            for agent_idx in range(1, num_agents):
-                agent_feature = node_features[agent_idx].view(-1)  # [num_node_features]
-                # Pad the remaining feature_length - num_node_features with zeros
-                agent_feature_padded = torch.zeros(feature_length, dtype=torch.float, device=device)
-                agent_feature_padded[:num_node_features] = agent_feature
-                serialized_tensor[batch_idx, agent_idx] = agent_feature_padded
+            # for agent_idx in range(1, num_agents):
+            #     agent_feature = node_features[agent_idx].view(-1)  # [num_node_features]
+            #     # Pad the remaining feature_length - num_node_features with zeros
+            #     agent_feature_padded = torch.zeros(feature_length, dtype=torch.float, device=device)
+            #     agent_feature_padded[:num_node_features] = agent_feature
+            #     serialized_tensor[batch_idx, agent_idx] = agent_feature_padded
         
         return serialized_tensor  # Shape: [batch_size, num_agents, feature_length]
 
