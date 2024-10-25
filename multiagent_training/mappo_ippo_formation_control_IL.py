@@ -444,7 +444,7 @@ def train(cfg: "DictConfig"):  # noqa: F821
         # distribution_class=Normal,
         distribution_kwargs={
             "min": env.unbatched_action_spec[("agents", "action")].space.low / 2,
-            "max": env.unbatched_action_spec[("agents", "action")].space.high /2 ,
+            "max": env.unbatched_action_spec[("agents", "action")].space.high /2,
         },
         return_log_prob=True,
     )

@@ -21,7 +21,7 @@ from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from torch.distributions import Normal
 from torchrl.modules.models.multiagent import MultiAgentMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
-
+from torch_geometric.nn import GATConv
 from utils.logging import init_logging, log_evaluation, log_training, save_video
 from utils.utils import DoneTransform
 
@@ -87,6 +87,11 @@ def train(cfg: "DictConfig"):  # noqa: F821
     num_layers = 3  # Number of transformer encoder layers
     nhead = 8  # Number of attention heads
     print("env action dim:{}".format(env.action_spec.shape[-1]))
+
+
+    # class GATModel(nn.Module):
+    # def __init__(self, in_channels, hidden_channels, out_channels, num_agents, max_obstacles, num_node_features, num_edge_features):
+
     gnn_actor_net =  torch.nn.Sequential(
         GINPolicyNetwork(hidden_dim, output_dim, num_layers, nhead),
         NormalParamExtractor(),  # this will just separate the last dimension into two outputs: a loc and a non-negative scale
@@ -116,7 +121,8 @@ def train(cfg: "DictConfig"):  # noqa: F821
     )
     actor_net = nn.Sequential(
         MultiAgentMLP(
-            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+            # n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+            n_agent_inputs=10,
             n_agent_outputs=2 * env.action_spec.shape[-1],
             # n_agent_outputs = 2* 2,
             n_agents=env.n_agents,
@@ -154,7 +160,8 @@ def train(cfg: "DictConfig"):  # noqa: F821
 
 
     module = MultiAgentMLP(
-        n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+        # n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+        n_agent_inputs=10,
         n_agent_outputs=1,
         n_agents=env.n_agents,
         centralised=cfg.model.centralised_critic,
@@ -397,90 +404,184 @@ def batch_from_dense_to_ptg(x, fov=0.35 * torch.pi, max_distance=10.0):
     
     return batch
 
-class GINPolicyNetwork(torch.nn.Module):
-    def __init__(self, hidden_dim, output_dim, num_layers, nhead, lidar_dim=20, processed_lidar_dim=20):
-        super(GINPolicyNetwork, self).__init__()
-
-        # LiDAR preprocessing layers
-        self.lidar_fc = torch.nn.Sequential(
-            torch.nn.Linear(lidar_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, processed_lidar_dim),  # Ensure the final output dimension matches processed_lidar_dim
-            torch.nn.ReLU()
-        )
-
-        # Define GINConv layers
-        nn1 = torch.nn.Sequential(
-            torch.nn.Linear(processed_lidar_dim + 6, hidden_dim),  # Adjust input_dim to include preprocessed LiDAR features
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim)
-        )
-        self.conv1 = GINConv(nn1)
-
-        nn2 = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim)
-        )
-        self.conv2 = GINConv(nn2)
-
-        # Transformer encoder layers
-        # print("hidden_dim:{}".format(hidden_dim))
-        encoder_layers = TransformerEncoderLayer(hidden_dim, nhead, dim_feedforward=hidden_dim, batch_first=True)
-        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers)
-
-        # Fully connected layer to output local target positions for each node
-        self.fc = Linear(hidden_dim, output_dim)
-
-    def forward(self, data):
-        # Gather input
-
-        batch_size, num_agents, feature_length = data.shape
-
-        # Separate original features and LiDAR data
-        original_features, lidar_data = data[:, :, :6], data[:, :, 6:]
-
-        # Preprocess LiDAR data
-        lidar_features = self.lidar_fc(lidar_data)
-
-        # Concatenate original features with preprocessed LiDAR features
-        node_features = torch.cat([original_features, lidar_features], dim=-1)
-        # print(f"Node features shape: {node_features.shape}")  # Debug print
-
-        # Convert dense tensor data to graph batch for the entire batch
-        # node_features = node_features.view(-1, node_features.shape[-1])  # Flatten the batch dimension
-        # batch_graph = batch_from_dense_to_ptg(node_features.view(batch_size, num_agents, -1))
-        batch_graph = batch_from_dense_to_ptg(node_features)
-        batch_graph = batch_graph.to("cuda:0")
-        x, edge_index, edge_attr = batch_graph.x, batch_graph.edge_index, batch_graph.edge_attr
-
-
-        # print("x shape:{}".format(x.shape))
-        # print("before conv1 edge_index:{}".format(edge_index))
-
-        # Apply GINConv layers
-        if edge_index.size(0) > 0:
-            x = self.conv1(x, edge_index)
-            x = F.relu(x)
-            x = self.conv2(x, edge_index)
-            x = F.relu(x)
+def single_tensor_to_data_list(tensor, max_obstacles, num_node_features, num_edge_features, num_agents):
+    """
+    Reconstructs a list of torch_geometric.Data objects from the serialized tensor.
+    Assumes that all graph data is serialized into the 0th agent's feature vector.
+    
+    Args:
+        tensor (torch.Tensor): Serialized tensor of shape (batch_size, num_agents, feature_length).
+        max_obstacles (int): Maximum number of obstacles per graph.
+        num_node_features (int): Number of features per node (excluding category).
+        num_edge_features (int): Number of features per edge.
+        num_agents (int): Number of agents per graph.
+    
+    Returns:
+        List[Data]: Reconstructed list of Data objects.
+    """
+    batch_size, num_agents_tensor, feature_length = tensor.shape
+    data_list = []
+    
+    # Calculate feature_length per graph
+    expected_feature_length = (num_agents + max_obstacles) * num_node_features + max_obstacles * 2 + max_obstacles * num_edge_features
+    if feature_length < expected_feature_length:
+        raise ValueError(f"Serialized tensor feature_length ({feature_length}) is less than expected ({expected_feature_length}).")
+    
+    for batch_idx in range(batch_size):
+        # Extract 0th agent's feature vector
+        graph_feature = tensor[batch_idx, 0]  # [feature_length]
+        
+        # Extract node features
+        node_features_length = (num_agents + max_obstacles) * num_node_features
+        flattened_node_features = graph_feature[:node_features_length]  # [num_agents + max_obstacles, num_node_features]
+        node_features = flattened_node_features.view(num_agents + max_obstacles, num_node_features)
+        
+        # Extract edge indices
+        edge_index_length = max_obstacles * 2  # Each edge has two indices
+        flattened_edge_index = graph_feature[node_features_length:node_features_length + edge_index_length]
+        edge_index = flattened_edge_index.view(max_obstacles, 2).long()  # [max_obstacles, 2]
+        
+        # Extract edge attributes
+        edge_attr_start = node_features_length + edge_index_length
+        flattened_edge_attr = graph_feature[edge_attr_start:edge_attr_start + max_obstacles * num_edge_features]
+        edge_attr = flattened_edge_attr.view(max_obstacles, num_edge_features)  # [max_obstacles, num_edge_features]
+        
+        # Reconstruct edge_index and edge_attr by removing padding
+        valid_edges = []
+        valid_edge_attrs = []
+        for edge_idx in range(edge_index.size(0)):
+            src, dst = edge_index[edge_idx]
+            if src < (num_agents + max_obstacles) and dst < (num_agents + max_obstacles):
+                # Assuming padding was done with zeros beyond valid nodes
+                # If an edge connects to node 0 (agent), it might be valid, so you might need another padding value
+                # Here, we consider all edges as valid except those connecting to padded nodes
+                # Modify this condition based on your padding strategy
+                if src >= num_agents and src >= num_agents + max_obstacles - (num_agents + max_obstacles):
+                    continue
+                if dst >= num_agents and dst >= num_agents + max_obstacles - (num_agents + max_obstacles):
+                    continue
+                valid_edges.append([src, dst])
+                valid_edge_attrs.append(edge_attr[edge_idx])
+        
+        if valid_edges:
+            edge_index = torch.tensor(valid_edges, dtype=torch.long).t().contiguous()  # [2, num_valid_edges]
+            edge_attr = torch.stack(valid_edge_attrs)  # [num_valid_edges, num_edge_features]
         else:
-            x = self.conv1(x, torch.zeros((2, 0), dtype=torch.long, device=x.device))
-            x = F.relu(x)
-            x = self.conv2(x, torch.zeros((2, 0), dtype=torch.long, device=x.device))
-            x = F.relu(x)
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attr = torch.empty((0, num_edge_features), dtype=torch.float)
+        
+        # Create Data object
+        data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
+        data_list.append(data)
+    
+    return data_list
 
-        # Apply transformer encoder layers
-        x = self.transformer_encoder(x.unsqueeze(1)).squeeze(1)
-        # print("x shape after transformer:{}".format(x.shape))
-        # Reshape x to (batch_size, num_agents, hidden_dim)
-        x = x.view(batch_size, num_agents, -1)
+class GATModel(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_agents, max_obstacles, num_node_features, num_edge_features):
+        super(GATModel, self).__init__()
+        self.num_agents = num_agents
+        self.max_obstacles = max_obstacles
+        self.num_node_features = num_node_features
+        self.num_edge_features = num_edge_features
 
-        # Output local target positions for each node
-        out = self.fc(x)  # Each node's hidden representation is passed through the fully connected layer
-        # print("policy out:{}".format(out))
-        # print("policy out shape:{}".format(out.shape))
-        return out
+        # GAT layers
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+
+        # Global pooling layer
+        self.pool = global_mean_pool
+
+        # Fully connected layers
+        self.fc1 = nn.Sequential(
+            nn.Linear(hidden_channels * 16, hidden_channels*4),
+            nn.ReLU()
+            # nn.Dropout(p=0.5)
+        )
+        self.fc2 = nn.Linear(4*hidden_channels, out_channels)
+
+
+    def forward(self, tensor):
+        """
+        Args:
+            data (Batch): Batched PyG Data object containing multiple graphs.
+
+        Returns:
+            predicted_positions (torch.Tensor): Predicted positions for all agents in all graphs.
+                                               Shape: [batch_size, num_agents, out_channels]
+        """
+        batch_size, num_agents_tensor, feature_length = tensor.shape
+        device = tensor.device
+        # x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        # torch.set_printoptions(threshold=torch.inf)
+        data_list = single_tensor_to_data_list(
+            tensor, 
+            max_obstacles=self.max_obstacles, 
+            num_node_features=self.num_node_features, 
+            num_edge_features=self.num_edge_features,
+            num_agents=self.num_agents
+        )
+        batch = Batch.from_data_list(data_list)
+        x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
+
+        x = self.conv1(x, edge_index, edge_attr.squeeze(dim=1))
+        x = torch.relu(x)
+        # print("x after conv1:{}".format(x))
+        # print("after4 conv1 x shape:{}".format(x.shape))
+        # input("0, 1")
+        x = self.conv2(x, edge_index, edge_attr)
+        x = torch.relu(x)
+        x = self.conv3(x, edge_index, edge_attr)
+        x = torch.relu(x)
+        # print("x:{}".format(x))
+        # Global graph embedding
+        graph_embedding = self.pool(x, batch.batch)  # Shape: [batch_size, hidden_channels]
+
+        # Extract agent node embeddings
+        agent_embeddings = self.extract_agent_embeddings(x, batch.batch, batch.num_graphs)
+        # print("agent_embedding:{}".format(agent_embeddings))
+        # input("1")
+        # Repeat graph embedding for each agent
+        graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)  # Shape: [batch_size*num_agents, hidden_channels]
+
+        # Concatenate agent embeddings with graph embeddings
+        combined = torch.cat([agent_embeddings, graph_embedding_repeated], dim=1)  # Shape: [batch_size*num_agents, 2*hidden_channels]
+        # print("combined shape:{}".format(combined.shape))
+        # Fully connected layers
+        combined = self.fc1(combined)
+        combined = torch.relu(combined)
+        predicted_positions = self.fc2(combined)  # Shape: [batch_size*num_agents, out_channels]
+        # print("202 predicted positions:{}".format(predicted_positions))
+        # Reshape to [batch_size, num_agents, out_channels]
+        predicted_positions = predicted_positions.view(batch.num_graphs, self.num_agents, -1)
+        return predicted_positions
+
+    def extract_agent_embeddings(self, x, batch, batch_size):
+        """
+        Extracts agent node embeddings from the batched node features.
+
+        Args:
+            x (torch.Tensor): Node features after GIN layers. Shape: [total_nodes, hidden_channels]
+            batch (torch.Tensor): Batch vector, which assigns each node to a specific graph. Shape: [total_nodes]
+            batch_size (int): Number of graphs in the batch.
+
+        Returns:
+            agent_embeddings (torch.Tensor): Agent embeddings for all graphs. Shape: [batch_size * num_agents, hidden_channels]
+        """
+        agent_node_indices = []
+        for graph_idx in range(batch_size):
+            # Find node indices for the current graph
+            node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+            # Take the first `num_agents` nodes as agent nodes
+            agent_nodes = node_indices[:self.num_agents]
+            agent_node_indices.append(agent_nodes)
+        
+        # Concatenate all agent node indices
+        agent_node_indices = torch.cat(agent_node_indices, dim=0)
+        agent_embeddings = x[agent_node_indices]  # Shape: [batch_size * num_agents, hidden_channels]
+        return agent_embeddings
+    
+
 
 def batch_from_dense_to_ptg_critic(x, fov=0.35 * torch.pi, max_distance=10.0):
     critic_start = time.time()
@@ -700,7 +801,6 @@ def evaluation(cfg: "DictConfig"):  # noqa: F821
                 torch.tensor(5),
             )
     # print("env_test:{}".format(env_test))
-    # print("env obs spec:{}".format(env_test.observation_spec))
 
     # print("env action spec:{}".format(env_test.action_spec))
 
@@ -756,7 +856,8 @@ def evaluation(cfg: "DictConfig"):  # noqa: F821
 
     actor_net = nn.Sequential(
         MultiAgentMLP(
-            n_agent_inputs=env_test.observation_spec["agents", "observation"].shape[-1],
+            # n_agent_inputs=env_test.observation_spec["agents", "observation"].shape[-1],
+            n_agent_inputs=10,
             n_agent_outputs=2 * env_test.action_spec.shape[-1],
             n_agents=env_test.n_agents,
             centralised=False,
