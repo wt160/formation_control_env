@@ -253,3 +253,7 @@ cython_debug/
 !/.idea/multiagentparticlesimulator.iml
 
 multiagent_training/outputs/**/*
+
+*.mp4
+*.pkl
+vmas/examples/runs/*

@@ -3,19 +3,19 @@ seed: 0
 
 
 env:
-  max_steps: 300
+  max_steps: 200
   scenario_name: "formation_control_teacher"
   scenario:
     n_agents: 5
   device: ??? # These values will be populated dynamically
-  vmas_envs: 20
+  vmas_envs: 10
 
 model:
   shared_parameters: True
   centralised_critic: True  # MAPPO if True, IPPO if False
 
 collector:
-  frames_per_batch: 12000 # Frames sampled each sampling iteration
+  frames_per_batch: 3000 # Frames sampled each sampling iteration
   n_iters: 200 # Number of sampling/training iterations
   total_frames: ???
 
@@ -30,7 +30,7 @@ loss:
 
 train:
   num_epochs: 10  # optimization steps per batch of data collected
-  minibatch_size: 4096 # size of minibatches used in each epoch
+  minibatch_size: 1024 # size of minibatches used in each epoch
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???

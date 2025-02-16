@@ -3,6 +3,7 @@
 #  All rights reserved.
 import random
 from ctypes import byref
+import time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -78,6 +79,18 @@ class Environment(TorchVectorizedObject):
         self.visible_display = None
         self.text_lines = None
 
+    def get_obs(self, return_observations: bool = True,
+        return_info: bool = False,
+        return_dones: bool = False,):
+        result = self.get_from_scenario(
+            get_observations=return_observations,
+            get_infos=return_info,
+            get_rewards=False,
+            get_dones=return_dones,
+        )
+        return result[0] if result and len(result) == 1 else result
+    
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -148,7 +161,7 @@ class Environment(TorchVectorizedObject):
             rewards = {} if dict_agent_names else []
         if get_infos:
             infos = {} if dict_agent_names else []
-
+        # reward_time = time.time()
         if get_rewards:
             for agent in self.agents:
                 reward = self.scenario.reward(agent).clone()
@@ -156,6 +169,7 @@ class Environment(TorchVectorizedObject):
                     rewards.update({agent.name: reward})
                 else:
                     rewards.append(reward)
+        # print("reward time:{}".format(time.time() - reward_time))
         if get_observations:
             for agent in self.agents:
                 observation = TorchUtils.recursive_clone(
@@ -253,20 +267,24 @@ class Environment(TorchVectorizedObject):
             self._set_action(actions[i], agent)
         # Scenarios can define a custom action processor. This step takes care also of scripted agents automatically
         self.scenario.env_process_action_collectively()
+        # time1 = time.time()
         for agent in self.world.agents:
             self.scenario.env_process_action(agent)
-
+        # print("process)action time:{}".format(time.time() - time1))
         # advance world state
-        self.world.step()
 
+        # time3 = time.time()
+        self.world.step()
+        # print("step time:{}".format(time.time() - time3))
         self.steps += 1
+        # time2 = time.time()
         obs, rewards, dones, infos = self.get_from_scenario(
             get_observations=True,
             get_infos=True,
             get_rewards=True,
             get_dones=True,
         )
-
+        # print("get obs reward time:{}".format(time.time() - time2))
         return obs, rewards, dones, infos
 
     def done(self):

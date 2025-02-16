@@ -169,6 +169,7 @@ class GATModel(nn.Module):
             predicted_positions (torch.Tensor): Predicted positions for all agents in all graphs.
                                                Shape: [batch_size, num_agents, out_channels]
         """
+        print("data:{}".format(data))
         # Handle input types: single Data, list of Data, or Batch
         if isinstance(data, Data):
             data = Batch.from_data_list([data])
@@ -210,7 +211,7 @@ class GATModel(nn.Module):
 
         # Fully connected layers
         combined = self.fc1(combined)
-        combined = torch.relu(combined)
+        # combined = torch.relu(combined)
         predicted_positions = self.fc2(combined)
         # Shape: [batch_size * num_agents, out_channels]
 
@@ -363,7 +364,7 @@ class Scenario(BaseScenario):
         world.add_landmark(self.formation_center)
         world.add_landmark(self.leader_robot)
 
-        self.obstacle_pattern = 2
+        self.obstacle_pattern = 1
         self.create_obstacles(self.obstacle_pattern, world)
 
         def detect_obstacles(x):
@@ -496,9 +497,9 @@ class Scenario(BaseScenario):
         )
 
         num_agents=5
-        in_channels = 3
+        in_channels = 4
         hidden_channels = 64
-        out_channels = 2  # Assuming 2D positions
+        out_channels = 3  # Assuming 2D positions
 
         # Initialize the model, loss function, and optimizer
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1498,11 +1499,12 @@ class Scenario(BaseScenario):
 
             upper_policy_input = self.get_upper_policy_input()
             formation_policy_output = self.formation_model(upper_policy_input[0].to(self.device))
-            print("local agent_target_pos_global:{}".format(formation_policy_output))
+            print("local agent_target_pos_global shape:{}".format(formation_policy_output.shape))
+            input("1")
             self.agent_target_pos_global = self.transform_local_to_global(formation_policy_output, self.leader_robot.state.pos, self.leader_robot.state.rot, self.device)
-            print("agent_target_pos_global:{}".format(self.agent_target_pos_global))
+            # print("agent_target_pos_global:{}".format(self.agent_target_pos_global))
             self.agent_target_pos_global = self.agent_target_pos_global.squeeze(dim=0)
-            print("agent_target_pos_global shape:{}".format(self.agent_target_pos_global.shape))
+            # print("agent_target_pos_global shape:{}".format(self.agent_target_pos_global.shape))
 
         # angles = [-135/180.0*math.pi, 135/180.0*math.pi, -135/180.0*math.pi,  135/180.0*math.pi]
         # dists = [-0.8, -0.8, -1.6, -1.6]
@@ -2493,10 +2495,15 @@ class Scenario(BaseScenario):
         if near_obstacles_in_leader_frame != None:
             # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
         
-        
+            near_obstacles_in_leader_frame_add_dim = torch.zeros((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  
             near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
-            near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
+            
+            near_obstacles_in_leader_frame_tensor = torch.cat((near_obstacles_in_leader_frame, near_obstacles_in_leader_frame_add_dim), dim=1)
+            near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame_tensor, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
             num_obstacles = near_obstacles_in_leader_frame.size(0)
+            # near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
+            # near_obstacles_in_leader_frame = torch.cat((near_obstacles_in_leader_frame, near_obstacles_category), dim=1)  # Shape: [obstacle_num, 3]
+            # num_obstacles = near_obstacles_in_leader_frame.size(0)
         
 
 
@@ -2562,7 +2569,7 @@ class Scenario(BaseScenario):
     def get_upper_policy_input(self):
         graph_list = []
         agent_num = len(self.world.agents)
-        nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 2), device=self.device)
+        nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 3), device=self.device)
         
         # Define nominal positions for agents (assuming 5 agents)
         # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
@@ -2572,6 +2579,7 @@ class Scenario(BaseScenario):
         for i, nomi_agent in enumerate(self.world.agents):
             nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
             nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
+            nominal_formation_tensor[:, i, 2] = 0.0
         previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
 
 
@@ -2776,6 +2784,9 @@ class Scenario(BaseScenario):
         optimized_target_pos = optimized_target_pos.to(device)
         leader_robot_pos = leader_robot_pos.to(device)
         leader_robot_rot = leader_robot_rot.to(device)
+        print("optimized target pos shape:{}".format(optimized_target_pos.shape))
+        optimized_target_pos = optimized_target_pos[:, :, :2]
+        print("optimized target pos shape after :{}".format(optimized_target_pos.shape))
 
         # Step 1: Compute Inverse Rotation Matrices
         cos_theta = torch.cos(leader_robot_rot).unsqueeze(-1)  # Shape: [batch_dim, 1] or [1, 1]

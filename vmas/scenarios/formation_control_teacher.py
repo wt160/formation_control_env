@@ -726,6 +726,8 @@ class Scenario(BaseScenario):
                         dtype=torch.float32,
                         device=self.world.device,
                     )
+                    noise_level = 0.05
+
                     direction_1 = torch.tensor(
                         [
                             1,
@@ -734,6 +736,7 @@ class Scenario(BaseScenario):
                         dtype=torch.float32,
                         device=self.world.device,
                     )
+                    direction_1[1] += torch.randn(1, device=direction_1.device) * noise_level
                     direction_1 = direction_1 / torch.norm(direction_1)  # Normalize to get direction
 
                     start_pos_2 = torch.tensor(
@@ -752,6 +755,9 @@ class Scenario(BaseScenario):
                         dtype=torch.float32,
                         device=self.world.device,
                     )
+
+# Add random noise to the second dimension of direction_2
+                    direction_2[1] += torch.randn(1, device=direction_2.device) * noise_level
                     direction_2 = direction_2 / torch.norm(direction_2)  # Normalize to get direction
 
                     line_segments.extend(create_certain_line_segment(25, start_pos_1, direction_1))
@@ -2525,7 +2531,21 @@ class Scenario(BaseScenario):
         agent_num = len(self.world.agents)
         current_agent_index = self.world.agents.index(agent)
         graph_list = []
+        max_obstacles =100  # Define this attribute in your class
+        num_node_features = 3  # Assuming x and y coordinates
+        num_edge_features = 1  # Assuming distance as edge attribute
+        num_agents = agent_num  # Number of agents per graph
+        max_nodes = num_agents + max_obstacles  # Agents + Obstacles
+        max_edges = num_agents * max_obstacles * 2 + (num_agents * (num_agents - 1)) * 2  # Approximate
         
+        # Define feature_length:
+        # - Node features: max_nodes * num_node_features
+        # - Edge indices: max_edges * 2
+        # - Edge attributes: max_edges * num_edge_features
+        # Total feature_length = max_nodes*num_node_features + max_edges*(2 + num_edge_features)
+        
+        feature_length = max_nodes * num_node_features + max_edges * (2 + num_edge_features)
+        # feature_length = (num_agents + max_obstacles) * num_node_features + max_obstacles * 2 + max_obstacles * num_edge_features
         if current_agent_index == 0:
             agent_num = len(self.world.agents)
             nominal_formation_tensor = torch.zeros((self.world.batch_dim, agent_num, 3), device=self.device)
@@ -2594,10 +2614,7 @@ class Scenario(BaseScenario):
                 graph_list.append(current_graph)
 
 
-            max_obstacles =100  # Define this attribute in your class
-            num_node_features = 3  # Assuming x and y coordinates
-            num_edge_features = 1  # Assuming distance as edge attribute
-            num_agents = agent_num  # Number of agents per graph
+            
 
             if graph_list:
                 serialized_tensor = self.data_list_to_single_tensor(
@@ -2610,30 +2627,31 @@ class Scenario(BaseScenario):
                 # Handle case with no graphs
                 feature_length = (num_agents + max_obstacles) * num_node_features + max_obstacles * 2 + max_obstacles * num_edge_features
                 serialized_tensor = torch.zeros((self.world.batch_dim, num_agents, feature_length), device=self.device)
-            
+            # print("index 0 shape:{}".format(serialized_tensor.shape))
             return serialized_tensor  # Shape: [batch_size, num_agents, feature_length]
 
         
         else:
-            relative_to_other_robots_pose = []
-            relative_to_other_formation_pose = []
+            # relative_to_other_robots_pose = []
+            # relative_to_other_formation_pose = []
 
-            for i in range(len(self.world.agents)):
-                # formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
-                relative_to_other_formation_pose.append(self.formation_goals_landmark[i].state.pos - agent.state.pos)
+            # for i in range(len(self.world.agents)):
+            #     # formation_goals_positions.append(self.formation_goals_landmark[i].state.pos[0])
+            #     relative_to_other_formation_pose.append(self.formation_goals_landmark[i].state.pos - agent.state.pos)
             
 
-            relative_to_leader_pose = [self.leader_robot.state.pos - agent.state.pos]
+            # relative_to_leader_pose = [self.leader_robot.state.pos - agent.state.pos]
         
-            for a in self.world.agents:
-                if a != agent:
-                    relative_to_other_robots_pose.append(a.state.pos - agent.state.pos)
+            # for a in self.world.agents:
+            #     if a != agent:
+            #         relative_to_other_robots_pose.append(a.state.pos - agent.state.pos)
         
-            observation_tensor = torch.cat(
-                relative_to_leader_pose + relative_to_other_robots_pose  ,
-                dim=-1)
+            # observation_tensor = torch.cat(
+            #     relative_to_leader_pose + relative_to_other_robots_pose  ,
+            #     dim=-1)
             # print("agent {} obs:{} shape:{}".format(current_agent_index, observation_tensor, observation_tensor.shape))
-
+            observation_tensor = torch.zeros((self.world.batch_dim, feature_length), dtype=torch.float, device=self.device)
+            # print("other dim shape:{}".format(observation_tensor.shape))
             return observation_tensor
 
     

@@ -807,6 +807,7 @@ class Landmark(Entity):
         angular_friction: float = None,
         gravity: float = None,
         collision_filter: Callable[[Entity], bool] = lambda _: True,
+        renderable: bool=True,
     ):
         super().__init__(
             name,
@@ -825,6 +826,7 @@ class Landmark(Entity):
             angular_friction,
             gravity,
             collision_filter,
+            renderable,
         )
 
 
@@ -850,7 +852,7 @@ class Agent(Entity):
         obs_range: float = None,
         obs_noise: float = None,
         u_noise: Union[float, Sequence[float]] = 0.0,
-        u_range: Union[float, Sequence[float]] = 2.0,
+        u_range: Union[float, Sequence[float]] = 20.0,
         u_multiplier: Union[float, Sequence[float]] = 1.0,
         action_script: Callable[[Agent, World], None] = None,
         sensors: List[Sensor] = None,
@@ -1055,16 +1057,20 @@ class Agent(Entity):
             pass
             # for sensor in self._sensors:
             #     geoms += sensor.render(env_index=env_index)
-        if self._render_action and self.state.force is not None:
-            velocity = rendering.Line(
-                self.state.pos[env_index],
-                self.state.pos[env_index]
-                + self.state.force[env_index] * 2 * self.shape.circumscribed_radius(),
-                width=2,
-            )
-            velocity.set_color(*self.color)
-            geoms.append(velocity)
+        # if self._render_action and self.state.force is not None:
+        #     velocity = rendering.Line(
+        #         self.state.pos[env_index],
+        #         self.state.pos[env_index]
+        #         + self.state.force[env_index] * 2 * self.shape.circumscribed_radius(),
+        #         width=2,
+        #     )
+        #     velocity.set_color(*self.color)
+        #     geoms.append(velocity)
 
+        if True:
+            direction = rendering.Line(self.state.pos[env_index], self.state.pos[env_index] + torch.tensor([torch.cos(self.state.rot[env_index])*0.2, torch.sin(self.state.rot[env_index])*0.2], device = self.device), width=3)
+            direction.set_color(*self.color)
+            geoms.append(direction)
         return geoms
 
 
@@ -2402,7 +2408,7 @@ class World(TorchVectorizedObject):
                 torch.tensor(0.0, dtype=torch.float32, device=self.device),
                 (dist_min - dist) * sign / k,
             )
-            * k
+            * k * 0.3
         )
         force = (
             sign
