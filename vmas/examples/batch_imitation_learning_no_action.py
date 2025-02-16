@@ -2,10 +2,12 @@ import subprocess
 
 # List of argument sets to test
 argument_sets = [
-    {"data_filename": "collected_data_narrow_0_no_action.pkl", "policy_filename": "best_imitation_model_narrow_noise_0_no_action.pth"},
+    # {"data_filename": "collected_data_real_door_no_action.pkl", "policy_filename": "best_imitation_model_door_real_no_action.pth"},
+
+    {"data_filename": "collected_data_door_narrow_0_no_action.pkl", "policy_filename": "best_imitation_model_door_narrow_noise_0_no_action.pth"},
     {"data_filename": "collected_data_tunnel_0_no_action.pkl", "policy_filename": "best_imitation_model_tunnel_0_no_action.pth"},
-    {"data_filename": "collected_data_door_0_no_action.pkl", "policy_filename": "best_imitation_model_door_0_no_action.pth"},
-    {"data_filename": "collected_data_clutter_0_no_action.pkl", "policy_filename": "best_imitation_model_clutter_0_no_action.pth"},
+    # {"data_filename": "collected_data_door_0_no_action.pkl", "policy_filename": "best_imitation_model_door_0_no_action.pth"},
+    {"data_filename": "collected_data_clutter_11_no_action.pkl", "policy_filename": "best_imitation_model_clutter_0_no_action.pth"},
 ]
 
 # Loop through each set of arguments and call imitation_train.py

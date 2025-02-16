@@ -1,4 +1,5 @@
 import random
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -72,7 +73,7 @@ class VMASWrapper:
         # If done_override is provided, set done flags accordingly
         if done_override is not None:
             dones = dones | done_override.unsqueeze(1)  # Broadcast to [num_envs, n_agents]
-        print("dones:{}".format(dones))
+        # print("dones:{}".format(dones))
         return obs, summed_rewards, dones, infos
     # def step(self, actions):
     #     # actions: [num_envs, n_agents, action_dim]
@@ -305,7 +306,7 @@ critic_optimizer = optim.Adam(critic_model.parameters(), lr=3e-4)
 num_epochs = 3000
 num_agents = 5
 # steps_per_epoch = 300
-epoch_restart_num = 10
+epoch_restart_num = 5
 gamma = 0.99
 lam = 0.95
 clip_epsilon = 0.2
@@ -340,7 +341,7 @@ for epoch in range(num_epochs):
 
       # [num_envs]
     if train_env_type == "clutter":
-        max_steps_per_episode = 100
+        max_steps_per_episode = 50
     else:
         max_steps_per_episode = 150  # Adjust as needed
     # Initialize storage
@@ -372,7 +373,7 @@ for epoch in range(num_epochs):
         # env.render()
         # input("1")
         step_counters = torch.zeros(env.num_envs, device=device)
-
+        time_start = time.time()
         for step in range(steps_per_epoch):
             # print("obs:{}".format(obs))
             # print("obs[0]:{}".format(obs[0].x))
@@ -477,7 +478,7 @@ for epoch in range(num_epochs):
             # values_storage.append(state_value.squeeze(dim=1))
             obs = next_obs
             writer.add_scalar('Policy/std', action_std.mean().item(), epoch * steps_per_epoch*epoch_restart + steps_per_epoch*epoch_restart_num + step)
-
+        print("collect time:{}".format(time.time() - time_start))
 
     avg_reward = np.mean(epoch_rewards)
     avg_agent_collision_rew = np.mean(epoch_agent_collision_rewards)
@@ -690,8 +691,8 @@ for epoch in range(num_epochs):
     else:
         print(f'Epoch {epoch + 1}/{num_epochs}, critic Loss: {value_loss.item():.4f}, Avg Reward: {avg_reward:.4f}')
     from vmas.simulator.utils import save_video
-    if epoch % 3 == 0:
-        eval_epoch_restart_num = 4
+    if epoch % 5 == 0:
+        eval_epoch_restart_num = 10
         obs_storage = []
         actions_storage = []
         log_probs_storage = []
@@ -699,6 +700,8 @@ for epoch in range(num_epochs):
         dones_storage = []
         values_storage = []
         epoch_rewards = []
+        total_no_collision_num = 0
+        total_connection_num = 0
         for epoch_restart in range(eval_epoch_restart_num):
             env = VMASWrapper(
                 scenario_name="formation_control_teacher_graph_obs_cuda1",
@@ -710,6 +713,7 @@ for epoch in range(num_epochs):
                 is_evaluation_mode=True,
                 is_imitation=False,
                 working_mode="RL",
+                evaluation_index=epoch_restart,
                 )
             obs = env.get_obs() # [num_envs, n_agents, obs_dim]
             # env.render()
@@ -721,7 +725,7 @@ for epoch in range(num_epochs):
             print("reset obs device:{}".format(obs[0].x.device))
             # Initialize storage
             
-
+            
             for step in range(steps_per_epoch):
                 # print("obs:{}".format(obs))
                 # print("obs[0]:{}".format(obs[0].x))
@@ -775,6 +779,18 @@ for epoch in range(num_epochs):
                 rewards_storage.append(rewards)
                 # dones_storage.append(dones)
                 # values_storage.append(state_value.squeeze(dim=1))
+            
+                agent_info = infos[0]
+                
+                # 1 means in collision, 0 means no collision
+                no_collision_num = torch.sum(agent_info["eva_collision_num"] == 0)
+                total_no_collision_num += no_collision_num
+                 # 1 means connected, 0 means not connected
+                connection_num = torch.sum(agent_info["eva_connection_num"] == 1)
+                # print("connection_num:{}".format(connection_num))
+                # if connection_num < 4:
+                    # print("agent_connection:{}".format(agent_info["eva_connection_num"]))
+                total_connection_num += connection_num
                 obs = next_obs
             save_video("ppo_training_{}_{}".format(current_time, epoch), frame_list, fps=1 / 0.1)
 
@@ -782,13 +798,18 @@ for epoch in range(num_epochs):
         ep_rewards.append(avg_reward)
         writer.add_scalar('Evaluation Reward/avg_reward', avg_reward, epoch)
 
+        total_no_collision_rate = total_no_collision_num / (eval_epoch_restart_num*(num_agents-1)*steps_per_epoch )
+        total_connection_rate = total_connection_num / (eval_epoch_restart_num*(num_agents-1)*steps_per_epoch )
+        writer.add_scalar('Evaluation Metric/no_collision_rate', total_no_collision_rate, epoch)
+        writer.add_scalar('Evaluation Metric/connection_rate', total_connection_rate, epoch)
+
         if avg_reward > best_evaluation_reward:
             best_evaluation_reward = avg_reward
             # **Save the model**
             torch.save(clutter_actor_model.state_dict(), output_policy_filename)
             print(f'New best model saved with avg_reward: {best_evaluation_reward:.4f}')
         
-            save_video("ppo_training_{}_{}".format(current_time, epoch), frame_list, fps=1 / 0.1)
+            save_video("best_ppo_training_{}_{}".format(current_time, epoch), frame_list, fps=1 / 0.1)
         if avg_reward < -0.1:
             save_video("ppo_training_{}_{}_bad".format(current_time, epoch), frame_list, fps=1 / 0.1)
 env.close()
