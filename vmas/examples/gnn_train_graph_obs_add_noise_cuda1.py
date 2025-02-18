@@ -82,6 +82,11 @@ for data_index, data_point in enumerate(collected_data):
             angle_noise =-math.pi*0.3 +  math.pi*0.6*torch.rand((5,1), device="cpu")
             angle_noise = angle_noise.squeeze(dim=1)
             noise_features[:5, 6] += angle_noise
+
+            num_agents_to_noise = max(0, noise_features.shape[0] - 5)  # Number of agents beyond the first 5
+            noise = -0.1 + 0.2 * torch.rand((num_agents_to_noise, 2), device="cpu")  
+            if noise_features.shape[0] > 5:
+                noise_features[5:, :2] += noise
             # Create a new Data object with noisy features
             noisy_data = Data(x=noise_features, edge_index=edge_index, edge_attr=edge_attr, y=target_positions_tensor)
             dataset.append(noisy_data)

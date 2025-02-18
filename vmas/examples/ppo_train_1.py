@@ -12,7 +12,28 @@ from vmas import make_env
 
 
 import sys
+def set_seed(seed):
+    # Set the seed for Python random module
+    random.seed(seed)
+    
+    # Set the seed for NumPy
+    np.random.seed(seed)
+    
+    # Set the seed for PyTorch (CPU and GPU)
+    torch.manual_seed(seed)
+    
+    # For CUDA (if you are using GPU)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # In case of multiple GPUs
+    
+    # For deterministic operations in PyTorch (optional)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
+# Example usage:
+seed = 42  # Set the seed you want
+set_seed(seed)
 train_env_type = sys.argv[1]
 policy_filename = sys.argv[2]
 output_policy_filename = sys.argv[3]

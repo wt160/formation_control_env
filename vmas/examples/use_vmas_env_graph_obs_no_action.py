@@ -207,20 +207,56 @@ if __name__ == "__main__":
     # )
 
 
+    use_vmas_env(
+        scenario_name="formation_control_teacher_graph_obs_cuda1_no_action",
+        render=False,
+        num_envs=1,
+        n_steps=310,
+        save_render=False,
+        random_action=True,
+        continuous_actions=True,
+        collect_num=200,
+        is_imitation=True,
+        device="cpu",
+        env_type="door",
+        working_mode="imitation",
+        filename="collected_data_door_0_no_action.pkl",
+    )
+
+
     # use_vmas_env(
-    #     scenario_name="formation_control_teacher_graph_obs_cuda1",
+    #     scenario_name="formation_control_teacher_graph_obs_cuda1_no_action",
     #     render=False,
-    #     num_envs=2,
-    #     n_steps=310,
+    #     num_envs=1,
+    #     n_steps=300,
     #     save_render=False,
     #     random_action=True,
     #     continuous_actions=True,
-    #     collect_num=200,
+    #     collect_num=400,
+    #     is_imitation=True,
+    #     device="cuda",
+    #     env_type="clutter",
+    #     working_mode="imitation",
+    #     filename="collected_data_clutter_11_no_action.pkl",
+    # )
+
+
+
+
+    # use_vmas_env(
+    #     scenario_name="formation_control_teacher_graph_obs_cuda1_no_action",
+    #     render=False,
+    #     num_envs=1,
+    #     n_steps=500,
+    #     save_render=False,
+    #     random_action=True,
+    #     continuous_actions=True,
+    #     collect_num=400,
     #     is_imitation=True,
     #     device="cuda:1",
-    #     env_type="door",
+    #     env_type="door_and_narrow",
     #     working_mode="imitation",
-    #     filename="collected_data_door_0.pkl",
+    #     filename="collected_data_door_narrow_0_no_action.pkl",
     # )
 
 
@@ -232,49 +268,13 @@ if __name__ == "__main__":
         save_render=False,
         random_action=True,
         continuous_actions=True,
-        collect_num=400,
+        collect_num=200,
         is_imitation=True,
-        device="cuda",
-        env_type="clutter",
+        device="cpu",
+        env_type="narrow",
         working_mode="imitation",
-        filename="collected_data_clutter_11_no_action.pkl",
+        filename="collected_data_narrow_7_no_action.pkl",
     )
-
-
-
-
-    use_vmas_env(
-        scenario_name="formation_control_teacher_graph_obs_cuda1_no_action",
-        render=False,
-        num_envs=1,
-        n_steps=500,
-        save_render=False,
-        random_action=True,
-        continuous_actions=True,
-        collect_num=400,
-        is_imitation=True,
-        device="cuda:1",
-        env_type="door_and_narrow",
-        working_mode="imitation",
-        filename="collected_data_door_narrow_0_no_action.pkl",
-    )
-
-
-    # use_vmas_env(
-    #     scenario_name="formation_control_teacher_graph_obs_cuda1",
-    #     render=False,
-    #     num_envs=2,
-    #     n_steps=300,
-    #     save_render=False,
-    #     random_action=True,
-    #     continuous_actions=True,
-    #     collect_num=200,
-    #     is_imitation=True,
-    #     device="cuda:1",
-    #     env_type="narrow",
-    #     working_mode="imitation",
-    #     filename="collected_data_narrow_7.pkl",
-    # )
 
     # use_vmas_env(
     #     scenario_name="formation_control_teacher_graph_obs_cuda1_test",

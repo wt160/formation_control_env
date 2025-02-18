@@ -197,7 +197,7 @@ class Scenario(BaseScenario):
         self.shared_rew = kwargs.get("shared_rew", False)
         self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1)
         self.final_reward = kwargs.get("final_reward", 0.2)
-
+        self.max_connection_distance = kwargs.get("max_connection_distance", 1.8)
         
 
         self.min_distance_between_entities = self.agent_radius * 2 + 0.05
@@ -230,7 +230,7 @@ class Scenario(BaseScenario):
         self.max_obstacle_edge_range = 1.5
 
         # self.max_connection_distance = 1.7  # Example distance threshold
-        self.max_connection_distance = 1.8  # Example distance threshold
+         # Example distance threshold
         
         self.FOV_min = -0.3 * torch.pi
         self.FOV_max = 0.3 * torch.pi
@@ -1612,7 +1612,7 @@ class Scenario(BaseScenario):
                         length_left = random.random()*2
                     
                         
-                    
+                    self.door_x = -0.5
                     start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
                     end_pos = torch.tensor([-0.5, -4.5], dtype=torch.float32, device=self.world.device)
                     positions = self.create_line_segment_between_pos(start_pos, end_pos)

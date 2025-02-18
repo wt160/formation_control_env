@@ -13,7 +13,28 @@ from vmas import make_env
 
 
 import sys
+def set_seed(seed):
+    # Set the seed for Python random module
+    random.seed(seed)
+    
+    # Set the seed for NumPy
+    np.random.seed(seed)
+    
+    # Set the seed for PyTorch (CPU and GPU)
+    torch.manual_seed(seed)
+    
+    # For CUDA (if you are using GPU)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # In case of multiple GPUs
+    
+    # For deterministic operations in PyTorch (optional)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
+# Example usage:
+seed = 42  # Set the seed you want
+set_seed(seed)
 train_env_type = sys.argv[1]
 policy_filename = sys.argv[2]
 output_policy_filename = sys.argv[3]
@@ -21,10 +42,31 @@ steps_per_epoch = int(sys.argv[4])
 # Set device
 device = sys.argv[5]
 # device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+def set_seed(seed):
+    # Set the seed for Python random module
+    random.seed(seed)
+    
+    # Set the seed for NumPy
+    np.random.seed(seed)
+    
+    # Set the seed for PyTorch (CPU and GPU)
+    torch.manual_seed(seed)
+    
+    # For CUDA (if you are using GPU)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # In case of multiple GPUs
+    
+    # For deterministic operations in PyTorch (optional)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
+# Example usage:
+seed = 42  # Set the seed you want
+set_seed(seed)
 # Define your environment wrapper
 class VMASWrapper:
-    def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0):
+    def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0, max_connection_distance=1.8):
         self.env = make_env(
             scenario=scenario_name,
             num_envs=num_envs,
@@ -39,6 +81,7 @@ class VMASWrapper:
             is_imitation = is_imitation,
             working_mode=working_mode,
             evaluation_index = evaluation_index,
+            max_connection_distance=max_connection_distance,
         )
         self.device = device
         self.n_agents = n_agents
@@ -331,6 +374,12 @@ def compute_returns_and_advantages(rewards, masks, values, gamma, lam):
     return returns, advantages
 
 warm_up_epochs=10
+max_connection_distance = 1.8
+
+if train_env_type == "clutter":
+    max_connection_distance = 1.7
+else:
+    max_connection_distance = 1.8
 
 ep_rewards = []
 best_avg_reward = float('-inf')
@@ -368,6 +417,7 @@ for epoch in range(num_epochs):
             env_type=train_env_type,
             is_imitation=False,
             working_mode="RL",
+            max_connection_distance=max_connection_distance,
         )
         obs = env.get_obs()  # [num_envs, n_agents, obs_dim]
         # env.render()
@@ -714,6 +764,8 @@ for epoch in range(num_epochs):
                 is_imitation=False,
                 working_mode="RL",
                 evaluation_index=epoch_restart,
+                max_connection_distance=max_connection_distance,
+
                 )
             obs = env.get_obs() # [num_envs, n_agents, obs_dim]
             # env.render()

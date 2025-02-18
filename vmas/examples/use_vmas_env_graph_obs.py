@@ -224,21 +224,21 @@ if __name__ == "__main__":
     # )
 
 
-    use_vmas_env(
-        scenario_name="formation_control_teacher_graph_obs_cuda1",
-        render=False,
-        num_envs=2,
-        n_steps=300,
-        save_render=False,
-        random_action=True,
-        continuous_actions=True,
-        collect_num=400,
-        is_imitation=True,
-        device="cuda",
-        env_type="clutter",
-        working_mode="imitation",
-        filename="collected_data_clutter_11.pkl",
-    )
+    # use_vmas_env(
+    #     scenario_name="formation_control_teacher_graph_obs_cuda1",
+    #     render=False,
+    #     num_envs=2,
+    #     n_steps=300,
+    #     save_render=False,
+    #     random_action=True,
+    #     continuous_actions=True,
+    #     collect_num=400,
+    #     is_imitation=True,
+    #     device="cuda",
+    #     env_type="clutter",
+    #     working_mode="imitation",
+    #     filename="collected_data_clutter_11.pkl",
+    # )
 
 
 
@@ -258,21 +258,21 @@ if __name__ == "__main__":
     #     working_mode="imitation",
     #     filename="collected_data_door_narrow_0.pkl",
     # )
-    # use_vmas_env(
-    #     scenario_name="formation_control_teacher_graph_obs_cuda1",
-    #     render=False,
-    #     num_envs=2,
-    #     n_steps=300,
-    #     save_render=False,
-    #     random_action=True,
-    #     continuous_actions=True,
-    #     collect_num=200,
-    #     is_imitation=True,
-    #     device="cuda:1",
-    #     env_type="narrow",
-    #     working_mode="imitation",
-    #     filename="collected_data_narrow_7.pkl",
-    # )
+    use_vmas_env(
+        scenario_name="formation_control_teacher_graph_obs_cuda1",
+        render=True,
+        num_envs=1,
+        n_steps=300,
+        save_render=False,
+        random_action=True,
+        continuous_actions=True,
+        collect_num=200,
+        is_imitation=True,
+        device="cpu",
+        env_type="narrow",
+        working_mode="imitation",
+        filename="collected_data_narrow_8.pkl",
+    )
 
     # use_vmas_env(
     #     scenario_name="formation_control_teacher_graph_obs_cuda1_test",

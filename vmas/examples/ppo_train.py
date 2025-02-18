@@ -21,7 +21,28 @@ steps_per_epoch = int(sys.argv[4])
 # Set device
 device = sys.argv[5]
 # device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+def set_seed(seed):
+    # Set the seed for Python random module
+    random.seed(seed)
+    
+    # Set the seed for NumPy
+    np.random.seed(seed)
+    
+    # Set the seed for PyTorch (CPU and GPU)
+    torch.manual_seed(seed)
+    
+    # For CUDA (if you are using GPU)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # In case of multiple GPUs
+    
+    # For deterministic operations in PyTorch (optional)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
+# Example usage:
+seed = 42  # Set the seed you want
+set_seed(seed)
 # Define your environment wrapper
 class VMASWrapper:
     def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0):
