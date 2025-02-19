@@ -2034,31 +2034,9 @@ class Scenario(BaseScenario):
         # is_evaluation_mode == True
         else:
             if self.env_type == "narrow":
-                def add_noise(tensor, noise_level=0.1):
-                    noise = torch.randn_like(tensor) * noise_level  # Gaussian noise with mean 0 and std dev = noise_level
-                    return tensor + noise
-                center_noise_level = 0.3  # Adjust as needed for center position noise
-                polygon_radius_noise_level = 0.1  # Adju
-                center_list = []
-                center_list.append(add_noise(torch.tensor([-2.5, 1.8], dtype=torch.float32, device=self.device), center_noise_level))
-                center_list.append(add_noise(torch.tensor([-2.5, -1.8], dtype=torch.float32, device=self.device), center_noise_level))
-                center_list.append(add_noise(torch.tensor([1.2, 0], dtype=torch.float32, device=self.device), center_noise_level))
-
-                polygon_dict = {}
-                for poly_idx, center in enumerate(center_list):
-                    # polygon_radius = 0
-                    polygon_radius = 0.8 + np.random.uniform(-polygon_radius_noise_level, polygon_radius_noise_level)
-                    positions =  self.create_polygon_with_center(center, num_vertices = 8, polygon_radius=polygon_radius,sphere_radius=0.1, max_spheres_per_polygon=50, 
-            world_semidim=self.world_semidim, 
-            device=self.device)
-                    self.obstacle_center_list.append(center)
-                    self.obstacle_radius_list.append(polygon_radius)
-                    sphere_start_idx = len(line_segments)
-                    line_segments.extend(positions)
-                    sphere_end_idx = len(line_segments) 
-                    polygon_list.append(positions)
-                    polygon_dict[poly_idx] = list(range(sphere_start_idx, sphere_end_idx))
-                total_positions = len(line_segments)
+                current_idx = 0
+                obs_list = self.precompute_obs_dict[self.evaluation_index]
+                total_positions = len(obs_list)
                 self.obstacles = []  # Clear any existing obstacles
                 for obs_idx in range(total_positions):
                     obs = Landmark(
@@ -2072,15 +2050,16 @@ class Scenario(BaseScenario):
                     self.world.add_landmark(obs)
 
                 # Assign positions to obstacles
-                for polygon_idx, polygon_positions in enumerate(polygon_list):
-                    sphere_list = polygon_dict[polygon_idx]
-                    # noisy_position = line_segments[i_value] + noise  # Add noise to the line segment
+                for obs_idx in range(total_positions):
                     for d in range(self.world.batch_dim):
                     
-                        noise = torch.randn(line_segments[0].shape, device=self.device) * 0.08 # Scale noise as needed
+                        # noise = torch.randn(line_segments[0].shape, device=self.device) * 0.001 # Scale noise as needed
                     
-                        for sphere_idx in sphere_list:
-                            self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
+                        self.obstacles[obs_idx].set_pos(obs_list[obs_idx], batch_index = d)
+
+
+
+                
                 # for idx, obs in enumerate(self.obstacles):
                 #     obs.set_pos(line_segments[idx], batch_index=env_index)
                 print("obs num:{}".format(len(self.obstacles)))
@@ -2093,7 +2072,7 @@ class Scenario(BaseScenario):
                     
 
 
-                self.route_point_list = self.generate_route_points(distance_threshold=3.0, opening_threshold=1.2)
+                
                 
             elif self.env_type == "tunnel":
                 
@@ -2565,20 +2544,20 @@ class Scenario(BaseScenario):
                     
                     self.door_x = -0.5   
                     
-                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5, -4.5], dtype=torch.float32, device=self.world.device)
+                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.device)
+                    end_pos = torch.tensor([-0.5, -4.5], dtype=torch.float32, device=self.device)
                     positions = self.create_line_segment_between_pos(start_pos, end_pos)
                     self.precompute_obs_dict[eva_index].extend(positions)
-                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5, 4.0], dtype=torch.float32, device=self.world.device)
+                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.device)
+                    end_pos = torch.tensor([-0.5, 4.0], dtype=torch.float32, device=self.device)
                     positions = self.create_line_segment_between_pos(start_pos, end_pos)
                     self.precompute_obs_dict[eva_index].extend(positions)
-                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5 + length_right, down_end], dtype=torch.float32, device=self.world.device)
+                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.device)
+                    end_pos = torch.tensor([-0.5 + length_right, down_end], dtype=torch.float32, device=self.device)
                     positions = self.create_line_segment_between_pos(start_pos, end_pos)
                     self.precompute_obs_dict[eva_index].extend(positions)
-                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5 + length_left, up_end], dtype=torch.float32, device=self.world.device)
+                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.device)
+                    end_pos = torch.tensor([-0.5 + length_left, up_end], dtype=torch.float32, device=self.device)
                     positions = self.create_line_segment_between_pos(start_pos, end_pos)
                     self.precompute_obs_dict[eva_index].extend(positions)
 
@@ -2594,7 +2573,47 @@ class Scenario(BaseScenario):
                     # end_pos = torch.tensor([4, 3.5], dtype=torch.float32, device=self.world.device)
                     # positions = create_line_segment_between_pos(start_pos, end_pos)
                     # line_segments.extend(positions)
+            elif env_type == "narrow":
+                def add_noise(tensor, noise_level=0.1):
+                    noise = torch.randn_like(tensor) * noise_level  # Gaussian noise with mean 0 and std dev = noise_level
+                    return tensor + noise
+                for eva_index in range(self.evaluation_num):
+                    self.precompute_obs_dict[eva_index] = []
+                    self.precomputed_route_point_list[eva_index] = []
+                
+                    center_noise_level = 0.3  # Adjust as needed for center position noise
+                    polygon_radius_noise_level = 0.1  # Adju
+                    center_list = []
+                    center_list.append(add_noise(torch.tensor([-2.5, 1.8], dtype=torch.float32, device=self.device), center_noise_level))
+                    center_list.append(add_noise(torch.tensor([-2.5, -1.8], dtype=torch.float32, device=self.device), center_noise_level))
+                    center_list.append(add_noise(torch.tensor([1.2, 0], dtype=torch.float32, device=self.device), center_noise_level))
+
+                    polygon_dict = {}
+                    for poly_idx, center in enumerate(center_list):
+                        # polygon_radius = 0
+                        polygon_radius = 0.8 + np.random.uniform(-polygon_radius_noise_level, polygon_radius_noise_level)
+                        positions =  self.create_polygon_with_center(center, num_vertices = 8, polygon_radius=polygon_radius,sphere_radius=0.1, max_spheres_per_polygon=50, 
+                world_semidim=self.world_semidim, 
+                device=self.device)
+                        self.obstacle_center_list.append(center)
+                        self.obstacle_radius_list.append(polygon_radius)
+                        sphere_start_idx = len(self.precompute_obs_dict[eva_index])
+                        self.precompute_obs_dict[eva_index].extend(positions)
+                        sphere_end_idx = len(self.precompute_obs_dict[eva_index]) 
+                        # polygon_list.append(positions)
+                        polygon_dict[poly_idx] = list(range(sphere_start_idx, sphere_end_idx))
                     
+                    
+
+                    self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.1))
+                    if random.random() < 0.5:
+                        self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.1))
+                    else:
+                        self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.1))
+
+                with open(route_file_name, 'wb') as file:
+                    pickle.dump(self.precomputed_route_point_list, file)
+                    print(f"Data saved to {route_file_name}")    
 
                     
             # Save the computed data to a file
