@@ -2216,6 +2216,50 @@ class Scenario(BaseScenario):
                 pass
             elif self.env_type == "mixed":
                 pass
+            elif self.env_type == "door":
+                current_idx = 0
+                obs_list = self.precompute_obs_dict[self.evaluation_index]
+
+                total_positions = len(obs_list)
+                self.obstacles = []  # Clear any existing obstacles
+                for obs_idx in range(total_positions):
+                    obs = Landmark(
+                        name=f"obs_{obs_idx}",
+                        collide=True,
+                        movable=False,
+                        shape=Sphere(radius=0.1),
+                        color=Color.RED,
+                        renderable=True,
+                    )
+                    self.obstacles.append(obs)
+                    self.world.add_landmark(obs)
+
+                # total_invisible_positions = len(invisible_line_segments)
+                # for obs_idx in range(total_invisible_positions):
+                #     obs = Landmark(
+                #         name=f"obs_{obs_idx}",
+                #         collide=True,
+                #         movable=False,
+                #         shape=Sphere(radius=0.1),
+                #         color=Color.BLUE,
+                #         renderable=False,
+                #     )
+                    
+                #     self.world.add_landmark(obs)
+                #     for d in range(self.world.batch_dim):
+                #         obs.set_pos(invisible_line_segments[obs_idx], batch_index = d)
+                for obs_idx in range(total_positions):
+                    for d in range(self.world.batch_dim):
+                    
+                        # noise = torch.randn(line_segments[0].shape, device=self.device) * 0.001 # Scale noise as needed
+                    
+                        self.obstacles[obs_idx].set_pos(obs_list[obs_idx], batch_index = d)
+
+                # Create obstacle managers for each batch
+                for d in range(self.world.batch_dim):
+                    single_batch_obstacles = [obs.state.pos[d,:].squeeze() for obs in self.obstacles]
+                    manager = ObstacleManager(single_batch_obstacles)
+                    self.obstacle_manager_list.append(manager)
 
     def precompute_evaluation_scene(self, env_type):
         # Construct the file name based on the env_type
@@ -2504,7 +2548,55 @@ class Scenario(BaseScenario):
                     pickle.dump(self.precomputed_route_point_list, file)
                     print(f"Data saved to {route_file_name}")    
             
-            
+            elif env_type == "door":
+                for eva_index in range(self.evaluation_num):
+                    self.precompute_obs_dict[eva_index] = []
+                    self.precomputed_route_point_list[eva_index] = []
+                    down_start = -0.75 -0.3 + random.random()*0.6
+                    up_start    = 0.75 -0.3 + random.random()*0.6
+                    down_end = -0.6 -0.1 + random.random()*0.2
+                    up_end = 0.6 - 0.1 + random.random()*0.2
+                    if random.random() < 0.4:
+                        length_left = 0.1
+                        length_right = 0.1
+                    else:
+                        length_right = random.random()*2
+                        length_left = random.random()*2
+                    
+                    self.door_x = -0.5   
+                    
+                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.5, -4.5], dtype=torch.float32, device=self.world.device)
+                    positions = self.create_line_segment_between_pos(start_pos, end_pos)
+                    self.precompute_obs_dict[eva_index].extend(positions)
+                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.5, 4.0], dtype=torch.float32, device=self.world.device)
+                    positions = self.create_line_segment_between_pos(start_pos, end_pos)
+                    self.precompute_obs_dict[eva_index].extend(positions)
+                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.5 + length_right, down_end], dtype=torch.float32, device=self.world.device)
+                    positions = self.create_line_segment_between_pos(start_pos, end_pos)
+                    self.precompute_obs_dict[eva_index].extend(positions)
+                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.5 + length_left, up_end], dtype=torch.float32, device=self.world.device)
+                    positions = self.create_line_segment_between_pos(start_pos, end_pos)
+                    self.precompute_obs_dict[eva_index].extend(positions)
+
+                # with open(route_file_name, 'wb') as file:
+                #     pickle.dump(self.precomputed_route_point_list, file)
+                #     print(f"Data saved to {route_file_name}")    
+                   
+                    # start_pos = torch.tensor([2.7, -2.5], dtype=torch.float32, device=self.world.device)
+                    # end_pos = torch.tensor([2.7, 2.8], dtype=torch.float32, device=self.world.device)
+                    # positions = create_line_segment_between_pos(start_pos, end_pos)
+                    # line_segments.extend(positions)
+                    # start_pos = torch.tensor([4, -3.5], dtype=torch.float32, device=self.world.device)
+                    # end_pos = torch.tensor([4, 3.5], dtype=torch.float32, device=self.world.device)
+                    # positions = create_line_segment_between_pos(start_pos, end_pos)
+                    # line_segments.extend(positions)
+                    
+
+                    
             # Save the computed data to a file
             with open(file_name, 'wb') as file:
                 pickle.dump(self.precompute_obs_dict, file)
@@ -4480,7 +4572,7 @@ class Scenario(BaseScenario):
                     distance = torch.norm(agent_pos - obstacle_pos)
                     if distance <= self.max_obstacle_edge_range:  # Check if within threshold distance
                         # Add edges from agent to obstacle
-                        edge_index.append([agent_index, num_agents + obstacle_index])  # Agent to obstacle
+                        edge_index.append([agent_index, num_agents + obstacle_index])  # Agent to obstacleinfo
                         edge_index.append([num_agents + obstacle_index, agent_index])  # Obstacle to agent
                         edge_attr.append([distance.item()])  # Edge type 1 for agent-obstacle
                         edge_attr.append([distance.item()])  # Edge type 1 for agent-obstacle
