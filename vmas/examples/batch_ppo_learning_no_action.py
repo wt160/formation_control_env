@@ -9,7 +9,9 @@ import subprocess
 
 # List of argument sets to test
 argument_sets = [
-    {"train_env_type": "clutter", "policy_filename": "best_imitation_model_clutter_0_no_action.pth", "output_policy_filename": "best_ppo_clutter_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
+    {"train_env_type": "door", "policy_filename": "best_imitation_model_door_0_no_action.pth", "output_policy_filename": "best_ppo_door_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
+
+    # {"train_env_type": "clutter", "policy_filename": "best_imitation_model_clutter_0_no_action.pth", "output_policy_filename": "best_ppo_clutter_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
     # {"train_env_type": "door_and_narrow", "policy_filename": "best_imitation_model_door_narrow_0.pth", "output_policy_filename": "best_ppo_door_and_narrow_0.pth", "steps_per_epoch":"500", "device":"cpu"},
     # {"train_env_type": "tunnel", "policy_filename": "best_imitation_model_tunnel_1.pth", "output_policy_filename": "best_ppo_tunnel_0.pth", "steps_per_epoch":"500", "device":"cpu"},
     

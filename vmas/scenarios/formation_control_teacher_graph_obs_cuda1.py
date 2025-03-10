@@ -169,7 +169,7 @@ class Scenario(BaseScenario):
         self.init_positions_noise_level = kwargs.get("init_position_noise_level", 0)
         self.collisions = kwargs.get("collisions", True)
         self.viewer_size = (1100, 1100)
-        self.plot_grid = True
+        self.plot_grid = False
         self.grid_spacing = 1
         self.device =device
         # self.agents_with_same_goal = kwargs.get("agents_with_same_goal", 1)
@@ -197,7 +197,7 @@ class Scenario(BaseScenario):
         self.shared_rew = kwargs.get("shared_rew", False)
         self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1)
         self.final_reward = kwargs.get("final_reward", 0.2)
-
+        self.evaluation_noise = kwargs.get("evaluation_noise", 0.0)
         
 
         self.min_distance_between_entities = self.agent_radius * 2 + 0.05
@@ -230,7 +230,7 @@ class Scenario(BaseScenario):
         self.max_obstacle_edge_range = 1.5
 
         # self.max_connection_distance = 1.7  # Example distance threshold
-        self.max_connection_distance = 1.8  # Example distance threshold
+        self.max_connection_distance = 1.9  # Example distance threshold
         
         self.FOV_min = -0.3 * torch.pi
         self.FOV_max = 0.3 * torch.pi
@@ -317,6 +317,7 @@ class Scenario(BaseScenario):
                 movable=True,
                 rotatable=True,
                 color=Color.GREEN,
+                renderable=False,
             )
             # self.formation_goals_landmark[i].renderable = False
             world.add_landmark(self.formation_goals_landmark[i])
@@ -336,7 +337,7 @@ class Scenario(BaseScenario):
         self.leader_agent = Agent(
                 name=f"agent_0",
                 collide=self.collisions,
-                color=Color.BLUE,
+                color=Color.RED,
                 shape=Sphere(radius=self.agent_radius),
                 render_action=True,
                 dynamics=HolonomicWithRotation(), 
@@ -382,7 +383,7 @@ class Scenario(BaseScenario):
             agent = Agent(
                 name=f"agent_{i}",
                 collide=self.collisions,
-                color=color,
+                color=Color.BLUE,
                 shape=Sphere(radius=self.agent_radius),
                 render_action=True,
                 dynamics=HolonomicWithRotation(), 
@@ -410,7 +411,7 @@ class Scenario(BaseScenario):
 
             agent.angle_diff_rew = torch.zeros(batch_dim, device=device)
             agent.angle_diff_with_leader_rew = torch.zeros(batch_dim, device=device)
-
+            agent.prev_velocity = torch.zeros((batch_dim, 2), device=device)
 
             agent.formation_diff_rew = torch.zeros(batch_dim, device=device)
             agent.target_distance = torch.zeros(batch_dim, device=device)
@@ -832,7 +833,7 @@ class Scenario(BaseScenario):
 
 
     def spawn_obstacles(self, obstacle_pattern, env_index):
-        print("env_index:{}".format(env_index))
+        # print("env_index:{}".format(env_index))
         passage_indexes = []
         j = self.n_boxes // 2
         line_segments = []  # Store line segments to maintain continuity
@@ -1045,7 +1046,7 @@ class Scenario(BaseScenario):
                     for idx, obs in enumerate(self.obstacles):
                         obs.set_pos(line_segments[idx], batch_index=env_index)
                                 
-                    print("obs num:{}".format(len(self.obstacles)))    
+                    # print("obs num:{}".format(len(self.obstacles)))    
                                 
                     
                     
@@ -1366,7 +1367,7 @@ class Scenario(BaseScenario):
                                 self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
                     # for idx, obs in enumerate(self.obstacles):
                     #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                    print("obs num:{}".format(len(self.obstacles)))
+                    # print("obs num:{}".format(len(self.obstacles)))
 
                     self.obstacle_manager_list = []
                     for d in range(self.world.batch_dim):
@@ -1580,13 +1581,24 @@ class Scenario(BaseScenario):
                     single_batch_obstacles = [obs.state.pos[d, :].squeeze() for obs in self.obstacles]
                     manager = ObstacleManager(single_batch_obstacles)
                     self.obstacle_manager_list.append(manager)
-                    
-
-                self.route_point_list.append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.2))
+                
+                third_obs_center = center_list[2]
+                first_route_center = copy.deepcopy(third_obs_center)
+                first_route_center[0] -= 2.5
+                first_route_center[1] = 0
+                self.route_point_list.append(add_noise(first_route_center, 0.1))
                 if random.random() < 0.5:
-                    self.route_point_list.append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.3))
+                    third_obs_center[1] = -2
+                    self.route_point_list.append(third_obs_center)
                 else:
-                    self.route_point_list.append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.3))
+                    third_obs_center[1] = 2
+                    self.route_point_list.append(third_obs_center)
+
+                # self.route_point_list.append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.2))
+                # if random.random() < 0.5:
+                #     self.route_point_list.append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.3))
+                # else:
+                #     self.route_point_list.append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.3))
 
                 # self.route_point_list = self.generate_route_points(distance_threshold=3.0, opening_threshold=1.2)
 
@@ -2254,12 +2266,12 @@ class Scenario(BaseScenario):
                         self.precomputed_route_point_list = pickle.load(file)
                         
 
-                        print(f"Data loaded from {route_file_name}")
+                        # print(f"Data loaded from {route_file_name}")
             # Load the precomputed data from the file
             with open(file_name, 'rb') as file:
                 map_location = {'cuda:0': 'cpu'}
                 self.precompute_obs_dict = pickle.load(file)
-                print(f"Data loaded from {file_name}")
+                # print(f"Data loaded from {file_name}")
         else:
             if env_type == "clutter":
 
@@ -2603,13 +2615,23 @@ class Scenario(BaseScenario):
                         # polygon_list.append(positions)
                         polygon_dict[poly_idx] = list(range(sphere_start_idx, sphere_end_idx))
                     
-                    
-
-                    self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.1))
+                    third_obs_center = center_list[2]
+                    first_route_center = copy.deepcopy(third_obs_center)
+                    first_route_center[0] -= 2.5
+                    first_route_center[1] = 0
+                    self.precomputed_route_point_list[eva_index].append(add_noise(first_route_center, 0.1))
                     if random.random() < 0.5:
-                        self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.1))
+                        third_obs_center[1] = -2
+                        self.precomputed_route_point_list[eva_index].append(third_obs_center)
                     else:
-                        self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.1))
+                        third_obs_center[1] = 2
+                        self.precomputed_route_point_list[eva_index].append(third_obs_center)
+
+                    # self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.1))
+                    # if random.random() < 0.5:
+                    #     self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.1))
+                    # else:
+                    #     self.precomputed_route_point_list[eva_index].append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.1))
 
                 with open(route_file_name, 'wb') as file:
                     pickle.dump(self.precomputed_route_point_list, file)
@@ -2622,7 +2644,7 @@ class Scenario(BaseScenario):
                 print(f"Data saved to {file_name}")
 
     def reset_world_at(self, env_index: int = None):
-        print("reset_world_at {}".format(env_index))
+        # print("reset_world_at {}".format(env_index))
         self.update_formation_assignment_time[env_index] = time.time()
         # ScenarioUtils.spawn_entities_randomly(
         #     self.world.agents,
@@ -3528,7 +3550,7 @@ class Scenario(BaseScenario):
                             )
                         elif self.working_mode == "potential_field":
                             agent.set_vel(
-                            self.compute_agent_velocity(agent, i),
+                            self.compute_potential_field_velocity(agent, i),
                             batch_index=None,
                             )
                     elif self.obstacle_pattern == 2:
@@ -3668,6 +3690,167 @@ class Scenario(BaseScenario):
 
         return velocity  # Shape: [batch_size, 2]
 
+    def compute_potential_field_velocity(self, agent, agent_index):
+        # Get the agent's current position (batch_size x 2)
+        current_pos = agent.state.pos  # Shape: [batch_size, 2]
+
+        # Get the agent's formation goal position
+        goal_pos = self.formation_goals[agent_index][:, :2]  # Shape: [batch_size, 2]
+
+        # Compute the goal direction vector
+        goal_direction = goal_pos - current_pos  # Shape: [batch_size, 2]
+        goal_distance = torch.norm(goal_direction, dim=1, keepdim=True)  # Shape: [batch_size, 1]
+        goal_direction_normalized = goal_direction / (goal_distance + 1e-6)  # Avoid division by zero
+        if self.env_type == "clutter":
+            target_index = 0
+            if agent_index == 1:
+                target_index = 0
+            elif agent_index == 2:
+                target_index = 0
+            elif agent_index == 3:
+                target_index = 1
+            elif agent_index == 4:
+                target_index = 2 
+            leader_direction = self.formation_goals[target_index][:, :2] - current_pos
+        else:
+            leader_direction = self.formation_goals[0][:, :2] - current_pos
+        
+        
+
+        all_positions = [agent.state.pos for agent in self.world.agents]
+        center_pos = torch.stack(all_positions).mean(dim=0)  # Shape: [batch_size, 2]
+        center_direction =  center_pos - current_pos
+        center_distance = torch.norm(center_direction, dim = 1, keepdim=True)
+        center_direction_normalized = center_direction / (center_distance + 1e-6)
+        leader_distance = torch.norm(leader_direction, dim=1, keepdim=True)  # Shape: [batch_size, 1]
+        leader_direction_normalized = leader_direction / (leader_distance + 1e-6)  # Avoid division by zero
+
+        # Set the goal attraction strength
+        k_goal = 10.0
+        if self.env_type == "narrow" or self.env_type == "door" or self.env_type == "door_and_narrow":
+            k_leader = 6.0
+        elif self.env_type == "clutter":
+            k_leader = 1.0
+        else:
+            k_leader = 2.0
+
+        # Initialize the total force vector
+        total_force = k_goal *goal_distance* goal_direction_normalized  # Shape: [batch_size, 2]
+
+        k_center = 2.0
+        toward_center_forces = torch.zeros_like(total_force)
+        toward_center_forces = k_center* center_distance * center_direction_normalized
+        # Initialize repulsive forces
+        repulsive_forces = torch.zeros_like(total_force)  # Shape: [batch_size, 2]
+        toward_leader_forces = torch.zeros_like(total_force)
+        toward_leader_forces = k_leader*leader_distance* leader_direction_normalized
+        # For each batch dimension
+        batch_size = current_pos.shape[0]
+        for dim in range(batch_size):
+            # Get obstacle manager for this environment
+            obstacle_manager = self.obstacle_manager_list[dim]
+            # Get obstacles near the agent
+            obstacles = obstacle_manager.get_near_obstacles(current_pos[dim], 0.8)  # Adjust search radius as needed
+
+            if obstacles.numel() > 0:
+                # Convert obstacle positions to torch tensor
+                # obs_positions = torch.stack(obstacles).to(self.device)  # Shape: [num_obstacles, 2]
+
+                # Compute vectors from agent to obstacles
+                obs_vectors = current_pos[dim].unsqueeze(0) - obstacles  # Shape: [num_obstacles, 2]
+
+                # Compute distances
+                obs_distances = torch.norm(obs_vectors, dim=1, keepdim=True)  # Shape: [num_obstacles, 1]
+
+                # Avoid division by zero
+                obs_distances = torch.clamp(obs_distances, min=0.1)
+
+                # Compute repulsive forces
+                k_rep = 2  # Adjust repulsion strength as needed
+                influence_range = 0.5  # Obstacles within this range influence the agent
+                rep_force_magnitudes = k_rep * (1.0 / obs_distances - 1.0 / influence_range) / (obs_distances ** 2)
+                # Only consider obstacles within influence range
+                influence = (obs_distances < influence_range).float()
+                rep_force_magnitudes = rep_force_magnitudes * influence
+
+                # Compute repulsive force vectors
+                repulsive_force_vectors = (obs_vectors / obs_distances) * rep_force_magnitudes  # Shape: [num_obstacles, 2]
+
+                # Sum up repulsive forces
+                total_repulsive_force = repulsive_force_vectors.sum(dim=0)  # Shape: [2]
+
+                # Add to total force
+                repulsive_forces[dim] = total_repulsive_force
+            else:
+                toward_leader_forces[dim] = 0 
+        
+        k_agent_rep = 0.5             # Repulsion strength for agents (adjust as needed)
+        influence_range_agent = 0.2   # Influence range for agent repulsion
+        agent_rep_force = torch.zeros_like(total_force)  # Initialize repulsive force from agents
+
+        for dim in range(batch_size):
+            min_distance = float('inf')
+            rep_force_vector = torch.zeros(2).to(current_pos.device)
+            # Iterate through all agents in the world
+            for idx, other_agent in enumerate(self.world.agents):
+                if idx == agent_index:
+                    continue  # Skip the current agent
+                # Assuming each agent's state.pos is of shape [batch_size, 2]
+                other_pos = other_agent.state.pos[dim]
+                diff = current_pos[dim] - other_pos
+                distance = torch.norm(diff)
+                if distance < min_distance:
+                    min_distance = distance
+                    rep_force_vector = diff
+            # Only apply the repulsive force if the closest agent is within the influence range
+            if min_distance < influence_range_agent:
+                rep_force_norm = torch.norm(rep_force_vector)
+                rep_force_direction = rep_force_vector / (rep_force_norm + 1e-6)
+                rep_magnitude = k_agent_rep * (1.0 / (min_distance + 1e-6) - 1.0 / influence_range_agent) / (min_distance**2 + 1e-6)
+                agent_rep_force[dim] = rep_force_direction * rep_magnitude
+            else:
+                agent_rep_force[dim] = torch.zeros(2).to(current_pos.device)
+        
+        
+        
+        
+        # Add repulsive forces to total force 
+        total_force += repulsive_forces       
+        # total_force += toward_leader_forces 
+        total_force += toward_center_forces
+        total_force += agent_rep_force    
+        # Normalize the total force to get the velocity direction
+        total_force_norm = torch.norm(total_force, dim=1, keepdim=True)
+        velocity_direction = total_force / (total_force_norm + 1e-6)
+
+        # Set the agent's speed (you can adjust the speed as needed)
+        max_speed = 3  # Limit speed to prevent excessive velocities
+        agent_speed = torch.clamp(3*goal_distance, max=max_speed)  # Shape: [batch_size, 1]
+
+        new_velocity = velocity_direction * agent_speed
+
+        # --- Damping / Smoothing Step ---
+        # Blend the new velocity with the previous one to smooth out oscillations.
+        # Here, we assume agent.state has an attribute `prev_velocity`. If it doesn't exist,
+        # we initialize it to zero.
+        if hasattr(agent, "prev_velocity"):
+            smoothed_velocity = 0.7 * new_velocity + 0.3 * agent.prev_velocity
+        else:
+            smoothed_velocity = new_velocity
+        # Update the previous velocity for the next iteration
+        agent.prev_velocity = smoothed_velocity.clone()
+    # --- End of Damping Step ---
+
+        return smoothed_velocity
+        
+        
+        
+        
+        
+        # # Compute the velocity
+        # velocity = velocity_direction * agent_speed
+
+        # return velocity  # Shape: [batch_size, 2]
 
     def get_formation_minimal_through_width(self, formation_type, follower_formation_num, d, d_obs, robot_radius):
         if formation_type == "ren_shape":
@@ -4697,9 +4880,16 @@ class Scenario(BaseScenario):
                 action_u_tensor[i, 2] = 0
         nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
         nominal_formation_tensor = torch.cat((nominal_formation_tensor, action_u_tensor), dim=1)
+        def add_noise(tensor, noise_level=0.1):
+            noise = torch.rand_like(tensor) - 0.5
+            # Scale the noise by noise_level
+            noise = noise * noise_level
+            # Add the noise to the original tensor
+            return tensor + noise
         if near_obstacles_in_leader_frame is not None:
             # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
-        
+            # print("near_obstacles_in_leader_frame shape:{}".format(near_obstacles_in_leader_frame.shape))
+            near_obstacles_in_leader_frame = add_noise(near_obstacles_in_leader_frame, self.evaluation_noise)
             near_obstacles_in_leader_frame_add_dim = torch.zeros((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  
             near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
             action_u_placeholder = torch.ones((near_obstacles_in_leader_frame.size(0), 3), device=self.device)
@@ -4731,6 +4921,9 @@ class Scenario(BaseScenario):
             for agent_index in range(num_agents):
                 agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
                 for obstacle_index in range(num_obstacles):
+                    if self.evaluation_noise > 0.2:
+                        if random.random() < self.evaluation_noise:
+                            continue
                     obstacle_pos = near_obstacles_in_leader_frame[obstacle_index, :2]  # Get the position part
                     distance = torch.norm(agent_pos - obstacle_pos)
                     if distance <= self.max_obstacle_edge_range:  # Check if within threshold distance
@@ -5010,35 +5203,35 @@ class Scenario(BaseScenario):
         beta = 1.0   # Weight for angle difference
         #start
 
-        # for i, agent1 in enumerate(self.world.agents):
-        #     for j, agent2 in enumerate(self.world.agents):
-        #         if i != j:
-        #             pos_i = agent1.state.pos[env_index]
-        #             pos_j = agent2.state.pos[env_index]
-        #             rot_i = agent1.state.rot[env_index]
+        for i, agent1 in enumerate(self.world.agents):
+            for j, agent2 in enumerate(self.world.agents):
+                if i != j:
+                    pos_i = agent1.state.pos[env_index]
+                    pos_j = agent2.state.pos[env_index]
+                    rot_i = agent1.state.rot[env_index]
                     
-        #             rel_pos = pos_j - pos_i
-        #             d_ij = torch.norm(rel_pos).item()
+                    rel_pos = pos_j - pos_i
+                    d_ij = torch.norm(rel_pos).item()
                     
-        #             if d_ij <= self.max_connection_distance:
-        #                 # Calculate the relative angle using PyTorch operations only
-        #                 theta_ij = torch.atan2(rel_pos[1], rel_pos[0]) - rot_i
+                    if d_ij <= self.max_connection_distance:
+                        # Calculate the relative angle using PyTorch operations only
+                        theta_ij = torch.atan2(rel_pos[1], rel_pos[0]) - rot_i
 
-        #                 # Normalize the angle to be within the range [-π, π] using PyTorch
-        #                 theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))
+                        # Normalize the angle to be within the range [-π, π] using PyTorch
+                        theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))
 
-        #                 if self.FOV_min <= theta_ij <= self.FOV_max:
-        #                     # print("connect {} and {}".format(i, j))
-        #                     color = Color.RED.value
-        #                     line = rendering.Line(
-        #                         (agent1.state.pos[env_index]),
-        #                         (agent2.state.pos[env_index]),
-        #                         width=2,
-        #                     )
-        #                     xform = rendering.Transform()
-        #                     line.add_attr(xform)
-        #                     line.set_color(*color)
-        #                     geoms.append(line)
+                        if self.FOV_min <= theta_ij <= self.FOV_max:
+                            # print("connect {} and {}".format(i, j))
+                            color = Color.RED.value
+                            line = rendering.Line(
+                                (agent1.state.pos[env_index]),
+                                (agent2.state.pos[env_index]),
+                                width=2,
+                            )
+                            xform = rendering.Transform()
+                            line.add_attr(xform)
+                            line.set_color(*color)
+                            geoms.append(line)
 
         #end
         return geoms

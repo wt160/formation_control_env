@@ -10,8 +10,9 @@ import subprocess
 # List of argument sets to test
 argument_sets = [
     # {"train_env_type": "clutter", "policy_filename": "best_imitation_model_clutter_0_no_action.pth", "output_policy_filename": "best_ppo_clutter_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
-    {"train_env_type": "door_and_narrow", "policy_filename": "best_imitation_model_door_narrow_noise_0_no_action.pth", "output_policy_filename": "best_ppo_door_and_narrow_0_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
+    # {"train_env_type": "door_and_narrow", "policy_filename": "best_imitation_model_door_narrow_noise_0_no_action.pth", "output_policy_filename": "best_ppo_door_and_narrow_0_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
     # {"train_env_type": "tunnel", "policy_filename": "best_imitation_model_tunnel_1.pth", "output_policy_filename": "best_ppo_tunnel_0.pth", "steps_per_epoch":"500", "device":"cpu"},
+    {"train_env_type": "narrow", "policy_filename": "best_imitation_model_narrow_7_no_action.pth", "output_policy_filename": "best_ppo_narrow_0_no_action.pth", "steps_per_epoch":"500", "device":"cpu"},
     
     # {"data_filename": "collected_data_narrow_7.pkl", "policy_filename": "best_imitation_model_narrow_noise_7.pth"},
     # {"data_filename": "collected_data_tunnel_0.pkl", "policy_filename": "best_imitation_model_tunnel_0.pth"},

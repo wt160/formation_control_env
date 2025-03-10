@@ -974,6 +974,40 @@ class Scenario(BaseScenario):
 
             return positions
 
+        def create_line_segment_between_pos_with_random_missing(start_pos, end_pos, random_missing_rate = 0.2, radius=0.1):
+            """
+            Creates positions for spheres along a line segment defined by a starting point and an end point.
+
+            Args:
+                start_pos (torch.Tensor): Starting position. Shape: [2].
+                end_pos (torch.Tensor): End position. Shape: [2].
+                radius (float): Radius of each sphere. Determines the spacing between spheres. Default is 0.1.
+
+            Returns:
+                list[torch.Tensor]: List of positions along the line segment.
+            """
+            # Calculate the direction and total distance between start and end points
+            direction = end_pos - start_pos
+            total_distance = torch.norm(direction)
+            direction = direction / total_distance  # Normalize to get direction
+
+            # Calculate the fixed spacing (diameter of the sphere)
+            fixed_spacing = 2 * radius+ 0.001
+
+            # Calculate the number of spheres needed
+            num_spheres = int(total_distance // fixed_spacing) + 1
+
+            # Generate positions along the line segment
+            positions = []
+            for idx in range(num_spheres):
+                offset = fixed_spacing * idx
+                sphere_pos = start_pos + offset * direction
+                if random.random() < random_missing_rate:
+                    continue
+                positions.append(sphere_pos)
+
+            return positions
+
         def get_pos(i):
 
             if obstacle_pattern == 0:
@@ -1573,10 +1607,8 @@ class Scenario(BaseScenario):
 
             elif self.env_type == "door":
                 if len(line_segments) == 0:
-                    down_start = -0.75 -0.3 + random.random()*0.6
-                    up_start    = 0.75 -0.3 + random.random()*0.6
-                    down_end = -0.6 -0.1 + random.random()*0.2
-                    up_end = 0.6 - 0.1 + random.random()*0.2
+                    down_start = -0.45 - random.random()*0.3
+                    up_start    = 0.45 + random.random()*0.3
                     if random.random() < 0.4:
                         length_left = 0.1
                         length_right = 0.1
@@ -1586,23 +1618,26 @@ class Scenario(BaseScenario):
                     
                         
                     self.door_x = -0.5
-                    start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5, -3.0], dtype=torch.float32, device=self.world.device)
-                    positions = create_line_segment_between_pos(start_pos, end_pos)
+                    down_x_deviation = random.random()*0.1 - 0.05
+                    start_pos = torch.tensor([-0.5 + down_x_deviation, down_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.5+down_x_deviation, -2.3], dtype=torch.float32, device=self.world.device)
+                    positions = create_line_segment_between_pos_with_random_missing(start_pos, end_pos)
                     line_segments.extend(positions)
-                    start_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5, 3.0], dtype=torch.float32, device=self.world.device)
-                    positions = create_line_segment_between_pos(start_pos, end_pos)
+
+                    up_x_deviation = random.random()*0.1 - 0.05
+                    start_pos = torch.tensor([-0.5 + up_x_deviation, up_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.5 + up_x_deviation, 2.3], dtype=torch.float32, device=self.world.device)
+                    positions = create_line_segment_between_pos_with_random_missing(start_pos, end_pos)
                     line_segments.extend(positions)
                     
 
-                    start_pos = torch.tensor([-0.3, down_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.3, -3.0], dtype=torch.float32, device=self.world.device)
-                    positions = create_line_segment_between_pos(start_pos, end_pos)
+                    start_pos = torch.tensor([-0.3 + down_x_deviation, down_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.3 + down_x_deviation, -2.3], dtype=torch.float32, device=self.world.device)
+                    positions = create_line_segment_between_pos_with_random_missing(start_pos, end_pos)
                     line_segments.extend(positions)
-                    start_pos = torch.tensor([-0.3, up_start], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.3, 3.0], dtype=torch.float32, device=self.world.device)
-                    positions = create_line_segment_between_pos(start_pos, end_pos)
+                    start_pos = torch.tensor([-0.3 + up_x_deviation, up_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.3 + up_x_deviation, 2.3], dtype=torch.float32, device=self.world.device)
+                    positions = create_line_segment_between_pos_with_random_missing(start_pos, end_pos)
                     line_segments.extend(positions)
                     # start_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
                     # end_pos = torch.tensor([-0.5 + length_right, down_end], dtype=torch.float32, device=self.world.device)
@@ -1623,13 +1658,13 @@ class Scenario(BaseScenario):
                     # end_pos = torch.tensor([4, 3.5], dtype=torch.float32, device=self.world.device)
                     # positions = create_line_segment_between_pos(start_pos, end_pos)
                     # line_segments.extend(positions)
-                    start_pos = torch.tensor([-2.5, -2.5], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5, down_start], dtype=torch.float32, device=self.world.device)
+                    start_pos = torch.tensor([-2.5, -1.5], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.3, down_start], dtype=torch.float32, device=self.world.device)
                     invisible_positions = create_line_segment_between_pos(start_pos, end_pos)
                     invisible_line_segments.extend(invisible_positions)
 
                     start_pos = torch.tensor([-2.5, 1.5], dtype=torch.float32, device=self.world.device)
-                    end_pos = torch.tensor([-0.5, up_start], dtype=torch.float32, device=self.world.device)
+                    end_pos = torch.tensor([-0.3, up_start], dtype=torch.float32, device=self.world.device)
                     invisible_positions = create_line_segment_between_pos(start_pos, end_pos)
                     invisible_line_segments.extend(invisible_positions)
 

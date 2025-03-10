@@ -33,7 +33,7 @@ dataset = []
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-noise_total_num = 75
+noise_total_num = 5
 data_length = len(collected_data)
 
 for data_index, data_point in enumerate(collected_data):

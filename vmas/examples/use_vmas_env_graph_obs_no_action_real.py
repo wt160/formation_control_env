@@ -227,17 +227,17 @@ if __name__ == "__main__":
     use_vmas_env(
         scenario_name="formation_control_teacher_graph_obs_cuda1_no_action_real",
         render=False,
-        num_envs=2,
+        num_envs=1,
         n_steps=300,
         save_render=False,
         random_action=True,
         continuous_actions=True,
-        collect_num=300,
+        collect_num=800,
         is_imitation=True,
-        device="cuda",
+        device="cpu",
         env_type="door",
         working_mode="imitation",
-        filename="collected_data_real_door_no_action.pkl",
+        filename="collected_data_real_door_no_action_with_random_missing.pkl",
     )
 
 

@@ -33,11 +33,11 @@ dataset = []
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 
-noise_total_num = 75
+noise_total_num = 100
 data_length = len(collected_data)
 
 for data_index, data_point in enumerate(collected_data):
-    if data_index > data_length / 3:
+    if data_index > data_length / 2:
         break
     graph_data_list = data_point['graph_tensor']  # List of graphs with length batch_dim
     optimized_target_pos = data_point['optimized_target_pos']  # Dict of agent positions with batch_dim
@@ -213,7 +213,7 @@ criterion = nn.MSELoss()
 optimizer = optim.Adam(gnn_actor_net.parameters(), lr=0.001)
 
 # Training and validation
-num_epochs = 4
+num_epochs = 6
 best_val_loss = float('inf')
 
 for epoch in range(num_epochs):

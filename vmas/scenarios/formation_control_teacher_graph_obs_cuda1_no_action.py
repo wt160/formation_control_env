@@ -198,7 +198,9 @@ class Scenario(BaseScenario):
         self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1)
         self.final_reward = kwargs.get("final_reward", 0.2)
         self.max_connection_distance = kwargs.get("max_connection_distance", 1.8)
-        
+        self.evaluation_noise = kwargs.get("evaluation_noise", 0.0)
+
+        self.evaluation_noise_index = 0
 
         self.min_distance_between_entities = self.agent_radius * 2 + 0.05
         self.world_semidim = 7
@@ -832,7 +834,7 @@ class Scenario(BaseScenario):
 
 
     def spawn_obstacles(self, obstacle_pattern, env_index):
-        print("env_index:{}".format(env_index))
+        # print("env_index:{}".format(env_index))
         passage_indexes = []
         j = self.n_boxes // 2
         line_segments = []  # Store line segments to maintain continuity
@@ -1045,7 +1047,7 @@ class Scenario(BaseScenario):
                     for idx, obs in enumerate(self.obstacles):
                         obs.set_pos(line_segments[idx], batch_index=env_index)
                                 
-                    print("obs num:{}".format(len(self.obstacles)))    
+                    # print("obs num:{}".format(len(self.obstacles)))    
                                 
                     
                     
@@ -1366,7 +1368,7 @@ class Scenario(BaseScenario):
                                 self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
                     # for idx, obs in enumerate(self.obstacles):
                     #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                    print("obs num:{}".format(len(self.obstacles)))
+                    # print("obs num:{}".format(len(self.obstacles)))
 
                     self.obstacle_manager_list = []
                     for d in range(self.world.batch_dim):
@@ -1573,7 +1575,7 @@ class Scenario(BaseScenario):
                             self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
                 # for idx, obs in enumerate(self.obstacles):
                 #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                print("obs num:{}".format(len(self.obstacles)))
+                # print("obs num:{}".format(len(self.obstacles)))
 
                 self.obstacle_manager_list = []
                 for d in range(self.world.batch_dim):
@@ -1581,12 +1583,22 @@ class Scenario(BaseScenario):
                     manager = ObstacleManager(single_batch_obstacles)
                     self.obstacle_manager_list.append(manager)
                     
-
-                self.route_point_list.append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.2))
+                third_obs_center = center_list[2]
+                first_route_center = copy.deepcopy(third_obs_center)
+                first_route_center[0] -= 2.5
+                first_route_center[1] = 0
+                self.route_point_list.append(add_noise(first_route_center, 0.1))
                 if random.random() < 0.5:
-                    self.route_point_list.append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.3))
+                    third_obs_center[1] = -2
+                    self.route_point_list.append(third_obs_center)
                 else:
-                    self.route_point_list.append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.3))
+                    third_obs_center[1] = 2
+                    self.route_point_list.append(third_obs_center)
+                # self.route_point_list.append(add_noise(torch.tensor([-1, 0], dtype=torch.float32, device=self.device), 0.2))
+                # if random.random() < 0.5:
+                #     self.route_point_list.append(add_noise(torch.tensor([1.2, -2], dtype=torch.float32, device=self.device), 0.3))
+                # else:
+                #     self.route_point_list.append(add_noise(torch.tensor([1.2, 2], dtype=torch.float32, device=self.device), 0.3))
 
                 # self.route_point_list = self.generate_route_points(distance_threshold=3.0, opening_threshold=1.2)
 
@@ -2034,31 +2046,9 @@ class Scenario(BaseScenario):
         # is_evaluation_mode == True
         else:
             if self.env_type == "narrow":
-                def add_noise(tensor, noise_level=0.1):
-                    noise = torch.randn_like(tensor) * noise_level  # Gaussian noise with mean 0 and std dev = noise_level
-                    return tensor + noise
-                center_noise_level = 0.3  # Adjust as needed for center position noise
-                polygon_radius_noise_level = 0.1  # Adju
-                center_list = []
-                center_list.append(add_noise(torch.tensor([-2.5, 1.8], dtype=torch.float32, device=self.device), center_noise_level))
-                center_list.append(add_noise(torch.tensor([-2.5, -1.8], dtype=torch.float32, device=self.device), center_noise_level))
-                center_list.append(add_noise(torch.tensor([1.2, 0], dtype=torch.float32, device=self.device), center_noise_level))
-
-                polygon_dict = {}
-                for poly_idx, center in enumerate(center_list):
-                    # polygon_radius = 0
-                    polygon_radius = 0.8 + np.random.uniform(-polygon_radius_noise_level, polygon_radius_noise_level)
-                    positions =  self.create_polygon_with_center(center, num_vertices = 8, polygon_radius=polygon_radius,sphere_radius=0.1, max_spheres_per_polygon=50, 
-            world_semidim=self.world_semidim, 
-            device=self.device)
-                    self.obstacle_center_list.append(center)
-                    self.obstacle_radius_list.append(polygon_radius)
-                    sphere_start_idx = len(line_segments)
-                    line_segments.extend(positions)
-                    sphere_end_idx = len(line_segments) 
-                    polygon_list.append(positions)
-                    polygon_dict[poly_idx] = list(range(sphere_start_idx, sphere_end_idx))
-                total_positions = len(line_segments)
+                current_idx = 0
+                obs_list = self.precompute_obs_dict[self.evaluation_index]
+                total_positions = len(obs_list)
                 self.obstacles = []  # Clear any existing obstacles
                 for obs_idx in range(total_positions):
                     obs = Landmark(
@@ -2072,18 +2062,19 @@ class Scenario(BaseScenario):
                     self.world.add_landmark(obs)
 
                 # Assign positions to obstacles
-                for polygon_idx, polygon_positions in enumerate(polygon_list):
-                    sphere_list = polygon_dict[polygon_idx]
-                    # noisy_position = line_segments[i_value] + noise  # Add noise to the line segment
+                for obs_idx in range(total_positions):
                     for d in range(self.world.batch_dim):
                     
-                        noise = torch.randn(line_segments[0].shape, device=self.device) * 0.08 # Scale noise as needed
+                        # noise = torch.randn(line_segments[0].shape, device=self.device) * 0.001 # Scale noise as needed
                     
-                        for sphere_idx in sphere_list:
-                            self.obstacles[sphere_idx].set_pos(line_segments[sphere_idx] + noise, batch_index = d)
+                        self.obstacles[obs_idx].set_pos(obs_list[obs_idx], batch_index = d)
+
+
+
+                
                 # for idx, obs in enumerate(self.obstacles):
                 #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                print("obs num:{}".format(len(self.obstacles)))
+                # print("obs num:{}".format(len(self.obstacles)))
 
                 self.obstacle_manager_list = []
                 for d in range(self.world.batch_dim):
@@ -2093,7 +2084,6 @@ class Scenario(BaseScenario):
                     
 
 
-                self.route_point_list = self.generate_route_points(distance_threshold=3.0, opening_threshold=1.2)
                 
             elif self.env_type == "tunnel":
                 if len(line_segments) == 0:
@@ -2256,7 +2246,7 @@ class Scenario(BaseScenario):
                         self.obstacles[obs_idx].set_pos(obs_list[obs_idx], batch_index = d)
                 # for idx, obs in enumerate(self.obstacles):
                 #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                print("obs num:{}".format(len(self.obstacles)))
+                # print("obs num:{}".format(len(self.obstacles)))
 
                 self.obstacle_manager_list = []
                 for d in range(self.world.batch_dim):
@@ -2292,7 +2282,7 @@ class Scenario(BaseScenario):
                         self.obstacles[obs_idx].set_pos(obs_list[obs_idx], batch_index = d)
                 # for idx, obs in enumerate(self.obstacles):
                 #     obs.set_pos(line_segments[idx], batch_index=env_index)
-                print("obs num:{}".format(len(self.obstacles)))
+                # print("obs num:{}".format(len(self.obstacles)))
 
                 self.obstacle_manager_list = []
                 for d in range(self.world.batch_dim):
@@ -2301,6 +2291,50 @@ class Scenario(BaseScenario):
                     self.obstacle_manager_list.append(manager)
             elif self.env_type == "free":
                 pass
+            elif self.env_type == "door":
+                current_idx = 0
+                obs_list = self.precompute_obs_dict[self.evaluation_index]
+
+                total_positions = len(obs_list)
+                self.obstacles = []  # Clear any existing obstacles
+                for obs_idx in range(total_positions):
+                    obs = Landmark(
+                        name=f"obs_{obs_idx}",
+                        collide=True,
+                        movable=False,
+                        shape=Sphere(radius=0.1),
+                        color=Color.RED,
+                        renderable=True,
+                    )
+                    self.obstacles.append(obs)
+                    self.world.add_landmark(obs)
+
+                # total_invisible_positions = len(invisible_line_segments)
+                # for obs_idx in range(total_invisible_positions):
+                #     obs = Landmark(
+                #         name=f"obs_{obs_idx}",
+                #         collide=True,
+                #         movable=False,
+                #         shape=Sphere(radius=0.1),
+                #         color=Color.BLUE,
+                #         renderable=False,
+                #     )
+                    
+                #     self.world.add_landmark(obs)
+                #     for d in range(self.world.batch_dim):
+                #         obs.set_pos(invisible_line_segments[obs_idx], batch_index = d)
+                for obs_idx in range(total_positions):
+                    for d in range(self.world.batch_dim):
+                    
+                        # noise = torch.randn(line_segments[0].shape, device=self.device) * 0.001 # Scale noise as needed
+                    
+                        self.obstacles[obs_idx].set_pos(obs_list[obs_idx], batch_index = d)
+
+                # Create obstacle managers for each batch
+                for d in range(self.world.batch_dim):
+                    single_batch_obstacles = [obs.state.pos[d,:].squeeze() for obs in self.obstacles]
+                    manager = ObstacleManager(single_batch_obstacles)
+                    self.obstacle_manager_list.append(manager)
             elif self.env_type == "mixed":
                 pass
 
@@ -2318,12 +2352,12 @@ class Scenario(BaseScenario):
                         self.precomputed_route_point_list = pickle.load(file)
                         
 
-                        print(f"Data loaded from {route_file_name}")
+                        # print(f"Data loaded from {route_file_name}")
             # Load the precomputed data from the file
             with open(file_name, 'rb') as file:
                 map_location = {'cuda:0': 'cpu'}
                 self.precompute_obs_dict = pickle.load(file)
-                print(f"Data loaded from {file_name}")
+                # print(f"Data loaded from {file_name}")
         else:
             if env_type == "clutter":
 
@@ -2492,7 +2526,7 @@ class Scenario(BaseScenario):
                     
                 with open(route_file_name, 'wb') as file:
                     pickle.dump(self.precomputed_route_point_list, file)
-                    print(f"Data saved to {route_file_name}")    
+                    # print(f"Data saved to {route_file_name}")    
                     
                     total_positions = len(self.precompute_obs_dict[eva_index])
 
@@ -4508,7 +4542,7 @@ class Scenario(BaseScenario):
     
     def single_graph_from_data(self, d, nominal_formation_tensor, near_obstacles_in_leader_frame, threshold_distance=2.5):
         # print("nominal_formation_tensor shape:{}".format(nominal_formation_tensor.shape))
-        
+        self.evaluation_noise_index += 1
         nominal_formation_category = torch.zeros((nominal_formation_tensor.size(0), 1), device=self.device)  # [5, 1] with category 0
         action_u_tensor = torch.zeros((nominal_formation_tensor.size(0), 3), device=self.device) 
         if self.working_mode == "RL":
@@ -4577,9 +4611,16 @@ class Scenario(BaseScenario):
                 action_u_tensor[i, 2] = 0
         nominal_formation_tensor = torch.cat((nominal_formation_tensor, nominal_formation_category), dim=1)  # Shape: [5, 3]
         # nominal_formation_tensor = torch.cat((nominal_formation_tensor, action_u_tensor), dim=1)
+        def add_noise(tensor, noise_level=0.1):
+            noise = torch.rand_like(tensor) - 0.5
+            # Scale the noise by noise_level
+            noise = noise * noise_level
+            # Add the noise to the original tensor
+            return tensor + noise
         if near_obstacles_in_leader_frame is not None:
             # print("near_obstacles shape:{}".format(near_obstacles_in_leader_frame.shape))
-        
+            # print("eva noise:{}".format(self.evaluation_noise))
+            near_obstacles_in_leader_frame = add_noise(near_obstacles_in_leader_frame, self.evaluation_noise)
             near_obstacles_in_leader_frame_add_dim = torch.zeros((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  
             near_obstacles_category = torch.ones((near_obstacles_in_leader_frame.size(0), 1), device=self.device)  # [obstacle_num, 1] with category 1
             action_u_placeholder = torch.ones((near_obstacles_in_leader_frame.size(0), 3), device=self.device)
@@ -4611,6 +4652,9 @@ class Scenario(BaseScenario):
             for agent_index in range(num_agents):
                 agent_pos = nominal_formation_tensor[agent_index, :2]  # Get the position part
                 for obstacle_index in range(num_obstacles):
+                    if self.evaluation_noise > 0.2:
+                        if random.random() < self.evaluation_noise:
+                            continue
                     obstacle_pos = near_obstacles_in_leader_frame[obstacle_index, :2]  # Get the position part
                     distance = torch.norm(agent_pos - obstacle_pos)
                     if distance <= self.max_obstacle_edge_range:  # Check if within threshold distance
@@ -4890,35 +4934,35 @@ class Scenario(BaseScenario):
         beta = 1.0   # Weight for angle difference
         #start
 
-        # for i, agent1 in enumerate(self.world.agents):
-        #     for j, agent2 in enumerate(self.world.agents):
-        #         if i != j:
-        #             pos_i = agent1.state.pos[env_index]
-        #             pos_j = agent2.state.pos[env_index]
-        #             rot_i = agent1.state.rot[env_index]
+        for i, agent1 in enumerate(self.world.agents):
+            for j, agent2 in enumerate(self.world.agents):
+                if i != j:
+                    pos_i = agent1.state.pos[env_index]
+                    pos_j = agent2.state.pos[env_index]
+                    rot_i = agent1.state.rot[env_index]
                     
-        #             rel_pos = pos_j - pos_i
-        #             d_ij = torch.norm(rel_pos).item()
+                    rel_pos = pos_j - pos_i
+                    d_ij = torch.norm(rel_pos).item()
                     
-        #             if d_ij <= self.max_connection_distance:
-        #                 # Calculate the relative angle using PyTorch operations only
-        #                 theta_ij = torch.atan2(rel_pos[1], rel_pos[0]) - rot_i
+                    if d_ij <= self.max_connection_distance:
+                        # Calculate the relative angle using PyTorch operations only
+                        theta_ij = torch.atan2(rel_pos[1], rel_pos[0]) - rot_i
 
-        #                 # Normalize the angle to be within the range [-π, π] using PyTorch
-        #                 theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))
+                        # Normalize the angle to be within the range [-π, π] using PyTorch
+                        theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))
 
-        #                 if self.FOV_min <= theta_ij <= self.FOV_max:
-        #                     # print("connect {} and {}".format(i, j))
-        #                     color = Color.RED.value
-        #                     line = rendering.Line(
-        #                         (agent1.state.pos[env_index]),
-        #                         (agent2.state.pos[env_index]),
-        #                         width=2,
-        #                     )
-        #                     xform = rendering.Transform()
-        #                     line.add_attr(xform)
-        #                     line.set_color(*color)
-        #                     geoms.append(line)
+                        if self.FOV_min <= theta_ij <= self.FOV_max:
+                            # print("connect {} and {}".format(i, j))
+                            color = Color.RED.value
+                            line = rendering.Line(
+                                (agent1.state.pos[env_index]),
+                                (agent2.state.pos[env_index]),
+                                width=2,
+                            )
+                            xform = rendering.Transform()
+                            line.add_attr(xform)
+                            line.set_color(*color)
+                            geoms.append(line)
 
         #end
         return geoms
