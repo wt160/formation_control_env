@@ -930,7 +930,6 @@ for epoch in range(num_epochs):
     
     
     print("training time:{}".format(time.time() - train_start_time))
-    input("1")
     # Logging after PPO updates for the epoch
     avg_epoch_run_reward = np.mean(epoch_run_rewards_log) if epoch_run_rewards_log else 0
     writer.add_scalar('Training/AverageReward_DuringCollection', avg_epoch_run_reward, epoch)
