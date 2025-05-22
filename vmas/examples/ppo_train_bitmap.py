@@ -510,7 +510,7 @@ critic_model = GATCritic(in_channels, hidden_dim, num_agents).to(device)
 # actor_model.load_state_dict(pretrained_weights)
 # expert_choose_net_weights = torch.load('best_expert_gate_net_free_clutter.pth')
 # pretrained_weights = torch.load('best_imitation_model_clutter.pth', map_location=device)
-# clutter_pretrained_weights = torch.load(policy_filename, map_location=device)
+clutter_pretrained_weights = torch.load(policy_filename, map_location=device)
 # free_pretrained_weights = torch.load('best_imitation_model_empty_noise_1.pth', map_location=device)
 
 
@@ -524,10 +524,10 @@ critic_model = GATCritic(in_channels, hidden_dim, num_agents).to(device)
 # pretrained_weights = torch.load('best_gnn_model.pth', map_location=device)
 # free_actor_model.load_state_dict(free_pretrained_weights, strict=False)
 
-# clutter_actor_model.load_state_dict(clutter_pretrained_weights, strict=False)
+clutter_actor_model.load_state_dict(clutter_pretrained_weights, strict=False)
 # expert_gate_net.load_state_dict(expert_choose_net_weights, strict=False)
 # Initialize the critic network
-clutter_actor_model.apply(initialize_weights)
+# clutter_actor_model.apply(initialize_weights)
 critic_model.apply(initialize_weights)
 # model = GATActorCritic(in_channels, hidden_dim, action_dim, num_agents).to(device)
 from datetime import datetime

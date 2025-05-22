@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import argparse # New import
 import os # New import for creating directories
 import sys
-
+import swanlab
 # train_env_type = sys.argv[1]
 # policy_filename = sys.argv[2]
 # output_policy_filename = sys.argv[3]
@@ -277,12 +277,44 @@ class GATActor(nn.Module):
         super(GATActor, self).__init__()
         self.num_agents = num_agents
 
+
+        self.lidar_cnn_hidden_channels_c1 = 16 # Hidden channels for first CNN layer (e.g., 16)
+        self.lidar_cnn_hidden_channels_c2 = 32 # Hidden channels for second CNN layer (e.g., 32)
+        self.lidar_embedding_dim = 14
+        self.lidar_dim = 20
+        self.lidar_encoder_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=self.lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2), # Halves sequence length if lidar_dim is even
+            nn.Conv1d(in_channels=self.lidar_cnn_hidden_channels_c1, out_channels=self.lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1), # Reduces sequence length to 1: Output [N, lidar_cnn_hidden_channels_c2, 1]
+            nn.Flatten(),            # Output: [N_total_nodes, lidar_cnn_hidden_channels_c2]
+            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim),
+            nn.ReLU()
+        )
+        # Output of lidar_encoder_cnn: [N_total_nodes, lidar_embedding_dim]
+
+        # 2. LiDAR Decoder (MLP to reconstruct raw LiDAR from embedding)
+        self.lidar_decoder_mlp = nn.Sequential(
+            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
+            nn.ReLU(),
+            nn.Linear(hidden_channels, self.lidar_dim) # Output raw lidar_dim
+            # No final activation if raw LiDAR values are not bounded like [0,1].
+            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
+        )
+
+
+        gnn_input_channels = in_channels - self.lidar_dim + self.lidar_embedding_dim
         # GAT layers
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
 
-    
+        
+
+
+
         limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
         self.action_limits = limits_tensor.view(1, action_dim)
         # self.register_buffer('action_limits', limits_tensor.view(1, self.action_dim))
@@ -297,10 +329,22 @@ class GATActor(nn.Module):
         self.fc2 = nn.Linear(hidden_channels * 4, action_dim * 2)
         # self.log_std = nn.Parameter(torch.zeros(1, 1, action_dim))
     def forward(self, data):
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        # print("x:{}".format(x.shape))
+        x_all_features, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        # print("x_all_features shape:{}".format(x_all_features.shape))
         # nominal_pos_diff = x[:, 3:]
-        x = self.conv1(x, edge_index, edge_attr.squeeze(dim=1))
+
+        original_node_features = x_all_features[:, :-self.lidar_dim] # All columns except the last lidar_dim ones
+        raw_lidar_scans_all_nodes = x_all_features[:, -self.lidar_dim:]  # The last lidar_dim columns
+        
+        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
+        
+        # 2. Decode LiDAR for reconstruction loss (using the same processed features)
+        reconstructed_lidar_all_nodes = self.lidar_decoder_mlp(processed_lidar_features)
+
+        # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
+        x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
+        
+        x = self.conv1(x_for_gnn, edge_index, edge_attr.squeeze(dim=1))
         x = torch.relu(x)
         x = self.conv2(x, edge_index, edge_attr)
         x = torch.relu(x)
@@ -335,7 +379,7 @@ class GATActor(nn.Module):
         action_mean_scaled = action_mean_tanh * self.action_limits # self.action_limits is broadcasted
         
         min_std_val = 0.01
-        max_std_val = 0.2
+        max_std_val = 0.3
         std_output_scaled = torch.sigmoid(action_std_raw_params) # scales to (0, 1)
         action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val)
         action_std_processed = action_std_processed + 1e-5 # Epsilon for stability
@@ -349,7 +393,7 @@ class GATActor(nn.Module):
         action_mean = action_mean_scaled.view(data.num_graphs, self.num_agents, -1)
         action_std = action_std_processed.view(data.num_graphs, self.num_agents, -1)
 
-        return action_mean, action_std
+        return action_mean, action_std, raw_lidar_scans_all_nodes, reconstructed_lidar_all_nodes
 
     def extract_agent_embeddings(self, x, batch, batch_size):
         agent_node_indices = []
@@ -453,6 +497,19 @@ def main(args):
     log_dir = os.path.join("runs", experiment_name, current_time)
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=log_dir)
+    swanlab.init(
+        # 设置项目名
+        project=experiment_name,
+        
+        # 设置超参数
+        config={
+            "train_env_type": args.train_env_type,
+            "has_laser": args.has_laser,
+            "env_nums": args.num_envs,
+        }
+    )
+
+
 
     # Model output directory
     model_save_dir = os.path.join("models", experiment_name)
@@ -572,7 +629,7 @@ def main(args):
     #     return returns, advantages
 
     warm_up_epochs=0
-    train_num_envs = 20
+    train_num_envs = args.num_envs
     ep_rewards = []
     best_avg_reward = float('-inf')
     best_evaluation_reward = float('-inf')
@@ -781,15 +838,21 @@ def main(args):
         avg_agent_collision_rew = np.mean(epoch_agent_collision_rewards)
         avg_group_center_rew = np.mean(epoch_group_center_rewards)
         avg_agent_collision_obstacle_rew = np.mean(epoch_agent_collision_obstacle_rewards)
-        # avg_agent_connection_rew = np.mean(epoch_agent_connection_rewards)
+        avg_agent_connection_rew = np.mean(epoch_agent_connection_rewards)
         # avg_agent_action_diff_rew = np.mean(epoch_agent_action_diff_rewards)
         # avg_target_collision_rew = np.mean(epoch_agent_target_collision_rewards)
 
         # ep_rewards.append(avg_reward)
         # writer.add_scalar('Reward/avg_reward', avg_reward, epoch)
+        swanlab.log({'Reward/avg_group_center_rew': avg_group_center_rew, 
+                     'Reward/agent_collision_rew': avg_agent_collision_rew,
+                     'Reward/agent_collision_obstacle_rew': avg_agent_collision_obstacle_rew,
+                     'Reward/agent_connection_rew': avg_agent_connection_rew}, step=epoch)
+        
         writer.add_scalar('Reward/avg_group_center_rew', avg_group_center_rew, epoch)
         writer.add_scalar('Reward/agent_collision_rew',avg_agent_collision_rew, epoch )
         writer.add_scalar('Reward/agent_collision_obstacle_rew', avg_agent_collision_obstacle_rew, epoch)
+        writer.add_scalar('Reward/agent_connection_rew',avg_agent_connection_rew, epoch )
         # avg_reward = np.mean(epoch_rewards)
         # avg_agent_collision_rew = np.mean(epoch_agent_collision_rewards)
         # avg_agent_connection_rew = np.mean(epoch_agent_connection_rewards)
@@ -913,6 +976,14 @@ def main(args):
                 
         # Logging after PPO updates for the epoch
         avg_epoch_run_reward = np.mean(epoch_run_rewards_log) if epoch_run_rewards_log else 0
+        
+        
+        
+        swanlab.log({'Training/AverageReward_DuringCollection': avg_epoch_run_reward, 
+                     'Loss/ActorLoss': actor_loss.item(),
+                     'Loss/CriticLoss': critic_loss.item(),
+                     'Loss/EntropyBonus': entropy_bonus.item()}, step=epoch)
+        
         writer.add_scalar('Training/AverageReward_DuringCollection', avg_epoch_run_reward, epoch)
         writer.add_scalar('Loss/ActorLoss', actor_loss.item(), epoch) # Last minibatch loss
         writer.add_scalar('Loss/CriticLoss', critic_loss.item(), epoch) # Last minibatch loss
@@ -923,7 +994,7 @@ def main(args):
             with torch.no_grad():
                 _, act_std_sample = clutter_actor_model(sample_obs_for_std_log)
                 writer.add_scalar('Policy/MeanActionStd', act_std_sample.mean().item(), epoch)
-
+                swanlab.log({'Policy/MeanActionStd': act_std_sample.mean().item()}, step=epoch)
 
         print(f'Epoch {epoch + 1}/{num_epochs}, Avg Reward (collection): {avg_epoch_run_reward:.3f}, ActorL: {actor_loss.item():.3f}, CriticL: {critic_loss.item():.3f}')
             
@@ -989,6 +1060,8 @@ def main(args):
                 # eval_env.close()
 
             avg_eval_reward = np.mean(eval_rewards_all_episodes) if eval_rewards_all_episodes else 0
+            swanlab.log({'Evaluation/AverageReward': avg_eval_reward}, step=epoch)
+            
             writer.add_scalar('Evaluation/AverageReward', avg_eval_reward, epoch)
             print(f'Epoch {epoch + 1} Evaluation: Avg Reward: {avg_eval_reward:.3f}')
 
