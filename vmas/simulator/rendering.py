@@ -327,15 +327,16 @@ class Image(Geom):
         self.x = x
         self.y = y
         self.scale = scale
+        # print("img shape:{}".format(img.shape))
+        # input("4")
         img_shape = img.shape
         img = img.astype(np.uint8).reshape(-1)
         tex_data = (pyglet.gl.GLubyte * img.size)(*img)
         pyg_img = pyglet.image.ImageData(
             img_shape[1],
             img_shape[0],
-            "RGBA",
-            tex_data,
-            pitch=img_shape[1] * img_shape[2] * 1,  # width x channels x bytes per pixel
+            "RGB",
+            tex_data  # width x channels x bytes per pixel
         )
         self.img = pyg_img
         self.sprite = pyglet.sprite.Sprite(
@@ -519,6 +520,39 @@ def render_function_util(
 
     return geom
 
+
+
+
+
+def make_image(bitmap, resolution, origin):
+    """
+    Creates an Image geometry from a bitmap, handling grayscale conversion and normalization.
+
+    Args:
+        bitmap (numpy.ndarray): Input image array (2D or 3D).
+        resolution (float or tuple): Scaling factor per pixel.
+        origin (numpy.ndarray): (x, y) of the image's bottom-left corner.
+
+    Returns:
+        Image: Configured Image object ready for rendering.
+    """
+    # # Ensure 3 channels (convert grayscale to RGB)
+    # print("bitmap shape:{}".format(bitmap.shape))
+    # input("5")
+    if bitmap.ndim == 2:
+        bitmap = np.repeat(bitmap[:, :, np.newaxis], 3, axis=-1)
+        
+    # Handle single-channel 3D arrays
+    # elif bitmap.ndim == 3 and bitmap.shape[2] == 1:
+        # bitmap = np.repeat(bitmap, 3, axis=-1)
+
+    # Normalize to 0-255 if needed and convert to uint8
+    if np.issubdtype(bitmap.dtype, np.floating):
+        bitmap = (bitmap * 255).astype(np.uint8)
+    else:
+        bitmap = bitmap.astype(np.uint8)
+
+    return Image(bitmap, origin[0], origin[1], resolution)
 
 def make_circle(radius=10, res=30, filled=True):
     points = []

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from torch import Tensor
-from vmas.make_env import make_env
+from vmas.make_vmas_env import make_env
 from scipy.optimize import linear_sum_assignment
 from vmas import render_interactively
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box, Line

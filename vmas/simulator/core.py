@@ -137,6 +137,18 @@ class Box(Shape):
         return rendering.make_polygon([(l, b), (l, t), (r, t), (r, b)])
 
 
+class Bitmap(Shape):
+    def __init__(self):
+        super().__init__()
+
+    def moment_of_inertia(self, mass: float):
+        pass
+    def get_delta_from_anchor(self, anchor: Tuple[float, float]) -> Tuple[float, float]:
+        pass
+    def get_geometry(self):
+        pass
+    def circumscribed_radius(self):
+        pass
 class Sphere(Shape):
     def __init__(self, radius: float = 0.05):
         super().__init__()
@@ -200,6 +212,8 @@ class Line(Shape):
             (self.length / 2, 0),
             width=self.width,
         )
+
+
 
 
 class EntityState(TorchVectorizedObject):
@@ -786,7 +800,194 @@ class Entity(TorchVectorizedObject, Observable, ABC):
 
         return [geom]
 
+class BitmapObstacle(Entity):
+    def __init__(self, 
+                 name: str,
+                 bitmap: Tensor,         # Shape: [batch_dim, height, width] (0 or 1)
+                 resolution: float,      # meters per pixel
+                 origin: Tuple[float, float] = (0.0, 0.0),
+                 obstacle_value: float = 0.0,
+                 collision_force: float = COLLISION_FORCE,
+                 color: Color = Color.BLACK):
+        super().__init__(name, movable=False, rotatable=False, collide=True, shape=Bitmap())
+        self.origin = origin
+        self.obstacle_value = obstacle_value
+        self.collision_force = collision_force
+        self.bitmap = bitmap
+        self.resolution = resolution
+        self.origin = torch.tensor(origin, device=self.device)
+        self.obstacle_value = obstacle_value
+        self.collision_force = collision_force
+        self.color = color
+        
+        # Precompute grid coordinates
+        self.grid_size = torch.tensor(bitmap.shape[1:], device=self.device).flipud() * resolution
+        self.grid_bounds = torch.stack([
+            self.origin,
+            self.origin + self.grid_size
+        ], dim=0)
 
+    def check_collision_with_poses(self, poses: Tensor) -> Tensor:
+        # poses: [batch_dim, agent_num, 2] 
+        # Return: [batch_dim]
+        batch_dim, agent_num, _ = poses.shape
+        
+        # Convert world coordinates to grid indices
+        grid_indices = self.pos_to_grid(poses)  # [batch_dim, agent_num, 2]
+        
+        # Extract x and y coordinates
+        y_indices = grid_indices[:, :, 1]  # [batch_dim, agent_num]
+        x_indices = grid_indices[:, :, 0]  # [batch_dim, agent_num]
+        
+        # Create a batch indices tensor for advanced indexing
+        batch_indices = torch.arange(batch_dim, device=self.device).view(-1, 1).expand(-1, agent_num)
+        
+        # Get bitmap values for all positions
+        # Using advanced indexing to get values from a 3D tensor
+        values = self.bitmap[batch_indices, y_indices, x_indices]  # [batch_dim, agent_num]
+        
+        # Check if any position is an obstacle in each batch
+        return (values == self.obstacle_value).any(dim=1)
+
+    def render(self, env_index: int = 0) -> List[Geom]:
+        from vmas.simulator import rendering
+        if not self.is_rendering[env_index]:
+            return []
+            
+        geom = rendering.make_image(
+            self.bitmap[env_index].cpu().numpy(),
+            self.resolution,
+            self.origin.cpu().numpy()
+        )
+        geom.set_color(*self.color)
+        return [geom]
+    def pos_to_grid(self, pos: Tensor) -> Tensor:
+        """Convert world coordinates to grid indices"""
+        grid_pos = (pos - self.origin) / self.resolution
+        
+        # 创建最小值和最大值的张量
+        min_val = torch.tensor(0, device=self.device)
+        max_val = torch.tensor(self.bitmap.shape[1:], device=self.device) - 1
+        
+        # 使用张量参数进行clamp
+        return grid_pos.long().clamp(min=min_val, max=max_val)
+
+    def get_grid_value(self, pos: Tensor) -> Tensor:
+        """Get grid value at position (batched)"""
+        indices = self.pos_to_grid(pos)
+        return self.bitmap[torch.arange(self.batch_dim), indices[..., 1], indices[..., 0]]
+    
+    def raycast(self, origin: Tensor, angles: Tensor, max_range: float) -> Tensor:
+        """Vectorized DDA raycasting with proper coordinate handling"""
+        # Normalize directions
+        dirs = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
+        dirs = dirs / torch.norm(dirs, dim=-1, keepdim=True).clamp(min=1e-8)
+        # print("dirs:{}".format(dirs))
+        batch_dim = origin.size(0)
+        device = origin.device
+        dists = torch.full((batch_dim,), max_range, device=device)
+        
+        # Convert to grid coordinates [batch, 2]
+        continuous_grid = (origin - self.origin) / self.resolution  # [batch, 2]
+        # print("continuous grid:{}".format(continuous_grid))
+        cell = torch.floor(continuous_grid).long()  # Integer grid indices [batch, 2]
+        cell_frac = continuous_grid - cell.float()  # Fraction within cell [0,1)
+        grid_width = self.bitmap.shape[2]
+        grid_height = self.bitmap.shape[1]
+        # cell = self.pos_to_grid(origin).float()
+        # print("cell_frac:{}".format(cell_frac))
+        # print("cell:{}".format(cell))
+        step = torch.sign(dirs).long()
+        step = torch.where(dirs.abs() < 1e-6, torch.zeros_like(step), step).long()
+        # print("step:{}".format(step))
+        # Grid dimensions [width, height]
+        # print("cell_frac/dirs:{}".format(cell_frac / dirs.abs()))
+        # cell_frac = cell - torch.floor(cell)
+        dirs_abs = dirs.abs().clamp(min=1e-8)
+        t_max = torch.where(
+            step != 0,
+            torch.where(
+                step > 0,
+                (1.0 - cell_frac) / dirs_abs,
+                cell_frac / dirs_abs
+            ),
+            torch.tensor(float('inf'), device=device)
+        ).clamp(min=0)
+        
+        t_delta = (1.0 / dirs_abs).clamp(max=1e5)# Prevent division overflow
+        # print("t_delta:{}".format(t_delta))
+        active = torch.ones(batch_dim, dtype=torch.bool, device=device)
+        current_t = torch.zeros(batch_dim, device=device)
+        
+        for _ in range(int(2 * max_range / self.resolution)):
+            if not active.any():
+                # print("break!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                break
+                
+            # Check current cell
+            cell_clamped = cell.clone()
+            cell_clamped[:, 0] = torch.clamp(cell_clamped[:, 0], 0, grid_width - 1)
+            cell_clamped[:, 1] = torch.clamp(cell_clamped[:, 1], 0, grid_height - 1)
+            # print("valid_cell:{}".format(valid_cell))
+            hit = torch.zeros_like(active)
+            # Access bitmap as [batch, y, x]
+            # print("cell value:{}".format(self.bitmap[
+            #     torch.arange(batch_dim, device=device),
+            #     cell_int[valid_cell, 1],  # y index
+            #     cell_int[valid_cell, 0]   # x index
+            # ]))
+            obstacle_mask = self.bitmap[
+            torch.arange(batch_dim, device=device),
+            cell_clamped[:, 1],  # y index
+            cell_clamped[:, 0]   # x index
+        ] == self.obstacle_value
+            
+            valid = (
+            (cell[:, 0] >= 0) & 
+            (cell[:, 0] < grid_width) &
+            (cell[:, 1] >= 0) & 
+            (cell[:, 1] < grid_height)
+        )
+            # print("obstacle_mask:{}".format(obstacle_mask))
+            hit[valid] = obstacle_mask[valid]
+            if hit.any():
+                current_dist = (continuous_grid - cell.float()).norm(dim=1) * self.resolution
+                dists = torch.where(hit, current_dist, dists)
+            # dists = torch.where(hit, torch.norm(origin - (cell_int * self.resolution + self.origin), dim=1), dists)
+                active &= ~hit
+            
+                
+            # print("step to next cell")
+            # Step to next cell
+            step_mask = t_max[:, 0] < t_max[:, 1]
+        
+            # Create axis mask [batch, 2] where True indicates axis to step
+            axis_mask = torch.stack([step_mask, ~step_mask], dim=1).long()
+            
+            # Update cell coordinates (only step in one axis per iteration)
+            cell += step * axis_mask
+
+            # step_mask = t_max[:, 0] < t_max[:, 1]
+            # step_mask_exp = step_mask.unsqueeze(-1)
+            # print("axis_mask:{}".format(axis_mask))
+            # step_sign = step * step_mask_exp.long()  # <-- Key fix: use long() here
+            # print("step_sign:{}".format(step_sign))
+            
+            # Update cell coordinates with integer math
+            # cell = torch.where(step_mask_exp, cell + step_sign, cell)
+            
+            # Update t_max with floating point math
+            t_max += t_delta * axis_mask.float()
+            
+            # Check termination
+            current_t = t_max.min(dim=1)[0] * self.resolution
+            active &= current_t <= max_range
+            # current_t = torch.max(t_max, dim=1)[0]
+            # print("current_t:{}".format(current_t))
+            # active &= current_t <= max_range
+            # print("active:{}".format(active))
+            
+        return dists
 # properties of landmark entities
 class Landmark(Entity):
     def __init__(
@@ -1364,7 +1565,7 @@ class World(TorchVectorizedObject):
         entity_filter: Callable[[Entity], bool] = lambda _: False,
     ):
         pos = entity.state.pos
-
+        # print("raycast")
         assert pos.ndim == 2 and angles.ndim == 1
         assert pos.shape[0] == angles.shape[0]
 
@@ -1373,20 +1574,29 @@ class World(TorchVectorizedObject):
             torch.full((self.batch_dim,), fill_value=max_range, device=self.device)
         ]
         for e in self.entities:
-            if entity is e or not entity_filter(e):
+            if not isinstance(e, BitmapObstacle):
                 continue
-            assert e.collides(entity) and entity.collides(
-                e
-            ), "Rays are only casted among collidables"
-            if isinstance(e.shape, Box):
-                d = self._cast_ray_to_box(e, pos, angles, max_range)
-            elif isinstance(e.shape, Sphere):
-                d = self._cast_ray_to_sphere(e, pos, angles, max_range)
-            elif isinstance(e.shape, Line):
-                d = self._cast_ray_to_line(e, pos, angles, max_range)
-            else:
-                raise RuntimeError(f"Shape {e.shape} currently not handled by cast_ray")
-            dists.append(d)
+            # print("ray cast to bitmap")
+            bitmap_dists = e.raycast(
+                origin=entity.state.pos,
+                angles=angles,
+                max_range=max_range
+            )
+            dists.append(bitmap_dists)
+            # if entity is e or not entity_filter(e):
+            #     continue
+            # assert e.collides(entity) and entity.collides(
+            #     e
+            # ), "Rays are only casted among collidables"
+            # if isinstance(e.shape, Box):
+            #     d = self._cast_ray_to_box(e, pos, angles, max_range)
+            # elif isinstance(e.shape, Sphere):
+            #     d = self._cast_ray_to_sphere(e, pos, angles, max_range)
+            # elif isinstance(e.shape, Line):
+            #     d = self._cast_ray_to_line(e, pos, angles, max_range)
+            # else:
+            #     raise RuntimeError(f"Shape {e.shape} currently not handled by cast_ray")
+            # dists.append(d)
         dist, _ = torch.min(torch.stack(dists, dim=-1), dim=-1)
         return dist
 
@@ -1609,7 +1819,8 @@ class World(TorchVectorizedObject):
                 self._apply_friction_force(entity)
                 # apply gravity
                 self._apply_gravity(entity)
-
+            # print("action foces:{}".format(self.forces_dict))
+            
                 # self._apply_environment_force(entity, i)
 
             self._apply_vectorized_enviornment_force()
@@ -1625,6 +1836,7 @@ class World(TorchVectorizedObject):
 
     # gather agent action forces
     def _apply_action_force(self, agent: Agent):
+        # print("add state force:{}".format(agent.state.force))
         if agent.movable:
             if agent.max_f is not None:
                 agent.state.force = TorchUtils.clamp_with_norm(
@@ -1717,10 +1929,15 @@ class World(TorchVectorizedObject):
         l_l = []
         b_l = []
         b_b = []
+        s_bitmap = []
         joints = []
+        # print("collision forces!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        # input("1")
         for a, entity_a in enumerate(self.entities):
             for b, entity_b in enumerate(self.entities):
                 if b <= a:
+                    continue
+                if entity_a.collide == False or entity_b.collide == False:
                     continue
                 joint = self._joints.get(
                     frozenset({entity_a.name, entity_b.name}), None
@@ -1729,61 +1946,92 @@ class World(TorchVectorizedObject):
                     joints.append((entity_a, entity_b, joint))
                     if joint.dist == 0:
                         continue
-                if not self.collides(entity_a, entity_b):
-                    continue
-                if isinstance(entity_a.shape, Sphere) and isinstance(
-                    entity_b.shape, Sphere
-                ):
-                    s_s.append((entity_a, entity_b))
-                elif (
-                    isinstance(entity_a.shape, Line)
+                if (
+                isinstance(entity_a.shape, Bitmap)
                     and isinstance(entity_b.shape, Sphere)
-                    or isinstance(entity_b.shape, Line)
+                    or isinstance(entity_b.shape, Bitmap)
                     and isinstance(entity_a.shape, Sphere)
                 ):
-                    line, sphere = (
+                    bitmap, sphere = (
                         (entity_a, entity_b)
                         if isinstance(entity_b.shape, Sphere)
                         else (entity_b, entity_a)
                     )
-                    l_s.append((line, sphere))
-                elif isinstance(entity_a.shape, Line) and isinstance(
-                    entity_b.shape, Line
-                ):
-                    l_l.append((entity_a, entity_b))
-                elif (
-                    isinstance(entity_a.shape, Box)
-                    and isinstance(entity_b.shape, Sphere)
-                    or isinstance(entity_b.shape, Box)
-                    and isinstance(entity_a.shape, Sphere)
-                ):
-                    box, sphere = (
-                        (entity_a, entity_b)
-                        if isinstance(entity_b.shape, Sphere)
-                        else (entity_b, entity_a)
-                    )
-                    b_s.append((box, sphere))
-                elif (
-                    isinstance(entity_a.shape, Box)
-                    and isinstance(entity_b.shape, Line)
-                    or isinstance(entity_b.shape, Box)
-                    and isinstance(entity_a.shape, Line)
-                ):
-                    box, line = (
-                        (entity_a, entity_b)
-                        if isinstance(entity_b.shape, Line)
-                        else (entity_b, entity_a)
-                    )
-                    b_l.append((box, line))
-                elif isinstance(entity_a.shape, Box) and isinstance(
-                    entity_b.shape, Box
-                ):
-                    b_b.append((entity_a, entity_b))
+                    # print("add s_bitmap with {}".format(sphere.name))
+                    s_bitmap.append((bitmap, sphere))
                 else:
-                    raise AssertionError()
+                
+                
+                    if not self.collides(entity_a, entity_b):
+                        continue
+                    if isinstance(entity_a.shape, Sphere) and isinstance(
+                        entity_b.shape, Sphere
+                    ):
+                        s_s.append((entity_a, entity_b))
+                    elif (
+                        isinstance(entity_a.shape, Line)
+                        and isinstance(entity_b.shape, Sphere)
+                        or isinstance(entity_b.shape, Line)
+                        and isinstance(entity_a.shape, Sphere)
+                    ):
+                        line, sphere = (
+                            (entity_a, entity_b)
+                            if isinstance(entity_b.shape, Sphere)
+                            else (entity_b, entity_a)
+                        )
+                        l_s.append((line, sphere))
+                    elif isinstance(entity_a.shape, Line) and isinstance(
+                        entity_b.shape, Line
+                    ):
+                        l_l.append((entity_a, entity_b))
+                    elif (
+                        isinstance(entity_a.shape, Box)
+                        and isinstance(entity_b.shape, Sphere)
+                        or isinstance(entity_b.shape, Box)
+                        and isinstance(entity_a.shape, Sphere)
+                    ):
+                        box, sphere = (
+                            (entity_a, entity_b)
+                            if isinstance(entity_b.shape, Sphere)
+                            else (entity_b, entity_a)
+                        )
+                        b_s.append((box, sphere))
+                    elif (
+                        isinstance(entity_a.shape, Box)
+                        and isinstance(entity_b.shape, Line)
+                        or isinstance(entity_b.shape, Box)
+                        and isinstance(entity_a.shape, Line)
+                    ):
+                        box, line = (
+                            (entity_a, entity_b)
+                            if isinstance(entity_b.shape, Line)
+                            else (entity_b, entity_a)
+                        )
+                        b_l.append((box, line))
+                    elif isinstance(entity_a.shape, Box) and isinstance(
+                        entity_b.shape, Box
+                    ):
+                        b_b.append((entity_a, entity_b))
+                    elif (
+                        isinstance(entity_a.shape, Bitmap)
+                        and isinstance(entity_b.shape, Sphere)
+                        or isinstance(entity_b.shape, Bitmap)
+                        and isinstance(entity_a.shape, Sphere)
+                    ):
+                        bitmap, sphere = (
+                            (entity_a, entity_b)
+                            if isinstance(entity_b.shape, Sphere)
+                            else (entity_b, entity_a)
+                        )
+                        # print("add s_bitmap")
+                        s_bitmap.append((bitmap, sphere))
+
+                    else:
+                        raise AssertionError()
         # Joints
         self._vectorized_joint_constraints(joints)
 
+        # self._sphere_bitmap_vectorized_collision(s_bitmap)
         # Sphere and sphere
         self._sphere_sphere_vectorized_collision(s_s)
         # Line and sphere
@@ -1876,7 +2124,251 @@ class World(TorchVectorizedObject):
                     force_b[:, i],
                     torque_b[:, i],
                 )
+    
 
+    def get_closest_point_bitmap(self, position, bitmap, origin=(0, 0), scale=1.0, max_distance=float('inf')):
+        """
+        Optimized version that uses distance transform for faster closest point computation.
+        
+        Args:
+            position (Tensor): The position to check from, shape (batch_dim, 2)
+            bitmap (Tensor): A binary bitmap where 1 represents occupied space, shape (height, width)
+            origin (tuple): The (x, y) coordinates in world space that correspond to bitmap[0,0]
+            scale (float): The size of each bitmap cell in world units
+            max_distance (float): Maximum search distance
+            
+        Returns:
+            tuple: (closest_point, distance, normal_vector)
+        """
+        import torch.nn.functional as F
+        from scipy.ndimage import distance_transform_edt
+        import numpy as np
+        
+        batch_dim = position.shape[0]
+        device = position.device
+        
+        # Convert bitmap to numpy for distance transform
+        bitmap_np = bitmap.cpu().numpy().astype(np.uint8)
+        
+        # Invert bitmap (distance transform computes distance to 0s)
+        inv_bitmap = 1 - bitmap_np
+        
+        # Compute distance transform and gradient
+        dist_transform = distance_transform_edt(inv_bitmap)
+        
+        # Convert back to tensor
+        dist_transform_tensor = torch.from_numpy(dist_transform).to(device)
+        
+        # Scale distances to world units
+        dist_transform_tensor *= scale
+        
+        # Convert world positions to bitmap coordinates
+        bitmap_height, bitmap_width = bitmap.shape
+        pos_x = ((position[:, 0] - origin[0]) / scale).clamp(0, bitmap_width - 1)
+        pos_y = ((position[:, 1] - origin[1]) / scale).clamp(0, bitmap_height - 1)
+        
+        # Sample distance transform at the query positions using bilinear interpolation
+        grid_y = (2.0 * pos_y / (bitmap_height - 1)) - 1.0
+        grid_x = (2.0 * pos_x / (bitmap_width - 1)) - 1.0
+        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(1).unsqueeze(1)  # [batch, 1, 1, 2]
+        
+        # Sample distance field
+        distances = F.grid_sample(
+            dist_transform_tensor.unsqueeze(0).unsqueeze(0),  # [1, 1, height, width]
+            grid,
+            align_corners=True,
+            mode='bilinear'
+        ).squeeze()  # [batch]
+        
+        # Compute gradient to get direction to closest point
+        # For simplicity, use finite differences on the distance field
+        epsilon = 0.01
+        dx_grid = torch.stack([grid_x + epsilon, grid_y], dim=-1).unsqueeze(1).unsqueeze(1)
+        dy_grid = torch.stack([grid_x, grid_y + epsilon], dim=-1).unsqueeze(1).unsqueeze(1)
+        
+        dx = F.grid_sample(
+            dist_transform_tensor.unsqueeze(0).unsqueeze(0),
+            dx_grid,
+            align_corners=True,
+            mode='bilinear'
+        ).squeeze() - distances
+        
+        dy = F.grid_sample(
+            dist_transform_tensor.unsqueeze(0).unsqueeze(0),
+            dy_grid,
+            align_corners=True,
+            mode='bilinear'
+        ).squeeze() - distances
+        
+        # Normalize gradient (points away from closest obstacle)
+        normals = torch.stack([dx, dy], dim=-1)
+        normal_lengths = torch.norm(normals, dim=1, keepdim=True)
+        normal_vectors = -normals / torch.clamp(normal_lengths, min=1e-6)
+        
+        # Compute closest points
+        closest_points = position - normal_vectors * distances.unsqueeze(-1)
+        
+        # Apply max distance filter
+        valid_mask = distances < max_distance
+        
+        return closest_points, distances, normal_vectors, valid_mask
+    
+    def _sphere_bitmap_vectorized_collision(self, s_bitmap):
+        if not len(s_bitmap):
+            return
+            
+        pos_s = []
+        radius_s = []
+        closest_points = []
+        bitmap_entities = []
+        sphere_entities = []
+        
+        for bitmap_entity, sphere_entity in s_bitmap:
+            # Get the lidar measurements for this sphere
+            lidar_readings = sphere_entity.sensors[0]._last_measurement  # Shape [batch_size, num_rays]
+            lidar_angles = sphere_entity.sensors[0]._angles  # Shape [num_rays]
+            sphere_radius = sphere_entity.shape.radius
+            sphere_pos = sphere_entity.state.pos  # Shape [batch_size, 2]
+            
+            # Check if any lidar reading is less than radius (suggesting collision)
+            # print("sphere_radius:{}".format(sphere_radius))
+            collision_mask = lidar_readings < sphere_radius
+            
+            # Skip if no collision detected by any lidar ray
+            if not torch.any(collision_mask):
+                continue
+                
+            batch_closest_points = []
+            # print("lidar reading shape:{}".format(lidar_readings.shape))
+            # Process each batch element
+            for batch_idx in range(self.batch_dim):
+                batch_collision_mask = collision_mask[batch_idx]
+                # print("batch_collision_mask:{}".format(batch_collision_mask))
+                # Skip if no collisions in this batch
+                if not torch.any(batch_collision_mask):
+                    # No collision - use a placeholder far point that won't generate force
+                    # Set a point far away (beyond collision range)
+                    dummy_point = sphere_pos[batch_idx] + torch.tensor([999.0, 999.0], device=self.device)
+                    batch_closest_points.append(dummy_point)
+                    continue
+                    
+                # sphere_entity.state.vel[batch_idx,:] = 0
+                # Find which ray gives the minimum distance (closest collision point)
+                batch_readings = lidar_readings[batch_idx]
+                # print("batch_reading:{}".format(batch_readings))
+                # Set non-colliding rays to a large value so they're not selected
+                filtered_readings = torch.where(batch_collision_mask, batch_readings, torch.tensor(float('inf'), device=self.device))
+                # print("filtered_readings:{}".format(filtered_readings))
+                min_idx = torch.argmin(filtered_readings)
+                # print("min_idx:{}".format(min_idx))
+                min_distance = batch_readings[min_idx]
+                # print("lidar_angles:{}".format(lidar_angles.shape))
+                min_angle = lidar_angles[batch_idx, min_idx] + sphere_entity.state.rot[batch_idx]
+                # print("min_angle:{}".format(min_angle))
+                # Calculate direction vector from angle
+                direction = torch.tensor([
+                    torch.cos(min_angle),
+                    torch.sin(min_angle)
+                ], device=self.device)
+                
+
+                # Calculate closest point
+                closest_point = sphere_pos[batch_idx] + direction * min_distance
+                batch_closest_points.append(closest_point)
+            
+            # Stack points for all batches for this entity pair
+            entity_closest_points = torch.stack(batch_closest_points, dim=0)
+            
+            # Collect data for vectorized force calculation
+            pos_s.append(sphere_pos)
+            radius_s.append(torch.tensor(sphere_radius, device=self.device))
+            closest_points.append(entity_closest_points)
+            bitmap_entities.append(bitmap_entity)
+            sphere_entities.append(sphere_entity)
+        
+        # If no valid collision points were found, return early
+        if not pos_s:
+            return
+            
+        # Stack and prepare for vectorized force calculation
+        pos_s = torch.stack(pos_s, dim=-2)
+        closest_points = torch.stack(closest_points, dim=-2)
+        radius_s = (
+            torch.stack(radius_s, dim=-1)
+            .unsqueeze(0)
+            .expand(self.batch_dim, -1)
+        )
+        # print("closest_points:{}".format(closest_points))
+        # print("pos_s:{}".format(pos_s))
+        # Calculate forces using constraint forces function
+        force_sphere, force_line = self._get_constraint_forces(
+            pos_s,
+            closest_points,
+            dist_min=radius_s + LINE_MIN_DIST,
+            force_multiplier=self._collision_force,
+        )
+        # print(" collision force:{}".format(force_sphere))
+        # input("force")
+        # Calculate torque for bitmap (though typically not used since bitmaps are static)
+        # No torque is calculated for spheres
+        
+        # Apply forces to entities
+        for i, (bitmap_entity, sphere_entity) in enumerate(zip(bitmap_entities, sphere_entities)):
+            self.update_env_forces(
+                bitmap_entity,
+                force_line[:, i],
+                0,  # No torque for bitmap
+                sphere_entity,
+                force_sphere[:, i],
+                0,  # No torque for sphere
+            )
+
+    # def _sphere_bitmap_vectorized_collision(self, s_bitmap):
+    #     if len(s_bitmap):
+    #         pos_l = []
+    #         pos_s = []
+    #         rot_l = []
+    #         radius_s = []
+    #         bitmap = s_bitmap[0][0]
+    #         input("2")
+    #         for _, sphere in s_bitmap:
+    #             lidar_reading = sphere.sensors[0]._last_measurement
+    #             print("lidar_reading:{}".format(lidar_reading))
+    #             lidar_angles = sphere.sensors[0].angles  # Shape [num_rays]
+    #             pos_s.append(sphere.state.pos)
+    #             radius_s.append(torch.tensor(sphere.shape.radius, device=self.device))
+                
+    #         pos_s = torch.stack(pos_s, dim=-2)
+    #         radius_s = (
+    #             torch.stack(
+    #                 radius_s,
+    #                 dim=-1,
+    #             )
+    #             .unsqueeze(0)
+    #             .expand(self.batch_dim, -1)
+    #         )
+            
+
+
+    #         # closest_point = self.get_closest_point_bitmap(bitmap, pos_s)
+    #         force_sphere, force_line = self._get_constraint_forces(
+    #             pos_s,
+    #             closest_point,
+    #             dist_min=radius_s + LINE_MIN_DIST,
+    #             force_multiplier=self._collision_force,
+    #         )
+    #         r = closest_point - pos_l
+    #         torque_line = TorchUtils.compute_torque(force_line, r)
+
+    #         for i, (entity_a, entity_b) in enumerate(s_bitmap):
+    #             self.update_env_forces(
+    #                 entity_a,
+    #                 force_line[:, i],
+    #                 torque_line[:, i],
+    #                 entity_b,
+    #                 force_sphere[:, i],
+    #                 0,
+    #             )   
     def _sphere_sphere_vectorized_collision(self, s_s):
         if len(s_s):
             pos_s_a = []
@@ -2444,7 +2936,12 @@ class World(TorchVectorizedObject):
                 entity.state.vel = entity.state.vel.clamp(
                     -entity.v_range, entity.v_range
                 )
+            # if entity.name == "agent_0":
+            #     print("current pos:{}".format(entity.state.pos))
             new_pos = entity.state.pos + entity.state.vel * self._sub_dt
+            # if entity.name == "agent_0":
+            #     print("vel:{}".format(entity.state.vel))
+            #     print("new_pos:{}".format(new_pos))
             entity.state.pos = torch.stack(
                 [
                     (
@@ -2468,11 +2965,17 @@ class World(TorchVectorizedObject):
                     entity.state.ang_vel = entity.state.ang_vel * (1 - entity.drag)
                 else:
                     entity.state.ang_vel = entity.state.ang_vel * (1 - self._drag)
+            # print("torque:{}".format(self.torques_dict[entity]))
+            # print("m:{}".format(entity.moment_of_inertia))
+
             entity.state.ang_vel = (
                 entity.state.ang_vel
                 + (self.torques_dict[entity] / entity.moment_of_inertia) * self._sub_dt
             )
+            # print("ang_vel:{}".format(entity.state.ang_vel))
             entity.state.rot = entity.state.rot + entity.state.ang_vel * self._sub_dt
+            entity.state.rot = torch.atan2(torch.sin(entity.state.rot), torch.cos(entity.state.rot)) 
+
 
     def _update_comm_state(self, agent):
         # set communication state (directly for now)

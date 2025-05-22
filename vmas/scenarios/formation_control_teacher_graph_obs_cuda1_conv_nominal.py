@@ -22,7 +22,7 @@ from tensordict import TensorDict
 from torch_geometric.nn import GCNConv, GINConv
 from torch_geometric.nn import global_mean_pool, global_add_pool
 from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, TransformerEncoder, TransformerEncoderLayer
-from vmas.make_env import make_env
+from vmas.make_vmas_env import make_env
 from scipy.optimize import linear_sum_assignment
 from vmas import render_interactively
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box, Line
@@ -362,11 +362,13 @@ class Scenario(BaseScenario):
         self.leader_agent.angle_diff_rew = self.leader_agent.pos_rew.clone()
         self.leader_agent.angle_diff_with_leader_rew = self.leader_agent.pos_rew.clone()
         self.leader_agent.connection_rew = torch.zeros(batch_dim, device=device)
-
+        self.leader_agent.prev_state_pos = torch.zeros((batch_dim, 2), device=device)
+        self.leader_agent.prev_state_rot = torch.zeros((batch_dim, 1), device=device)
 
         self.leader_agent.action_diff_rew = self.leader_agent.pos_rew.clone()
         self.leader_agent.target_distance = torch.zeros(batch_dim, device=device)
         self.leader_agent.goal = self.formation_goals_landmark[0]
+
         world.add_agent(self.leader_agent)
         # world.add_agent(self.leader_agent)
         # Add agents
@@ -410,7 +412,8 @@ class Scenario(BaseScenario):
 
             agent.angle_diff_rew = torch.zeros(batch_dim, device=device)
             agent.angle_diff_with_leader_rew = torch.zeros(batch_dim, device=device)
-
+            agent.prev_state_pos = torch.zeros((batch_dim, 2), device=device)
+            agent.prev_state_rot = torch.zeros((batch_dim, 1), device=device)
 
             agent.formation_diff_rew = torch.zeros(batch_dim, device=device)
             agent.target_distance = torch.zeros(batch_dim, device=device)
@@ -462,7 +465,7 @@ class Scenario(BaseScenario):
         self.keep_track_time = torch.zeros(batch_dim, device=device)
         self.update_formation_assignment_time = torch.zeros(batch_dim, device=device)
         self.current_assignments = None
-        
+        self.is_current_step_reset = True
         self.observe_D = 0.6
         self.batch_dim = batch_dim
         self.last_policy_output = None
@@ -473,7 +476,11 @@ class Scenario(BaseScenario):
             history_length=history_length,
             device=device
         )
+        self.LASER_BINS = 90        # 360度分成的激光束数量
 
+        self.laser_history_length = 3
+        self.batch_laser_sequence = torch.zeros((self.batch_dim, self.laser_history_length, self.LASER_BINS), 
+                                    device=self.device)
 
 
         self.eva_collision_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
@@ -3559,7 +3566,9 @@ class Scenario(BaseScenario):
                             torch.stack([0.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
                         batch_index=None,
                     )
-                    
+                    current_agent_index = self.world.agents.index(agent)
+                    print("agent {} cmd vel:{}, ang_vel:{}".format(current_agent_index, agent.state.vel, agent.state.ang_vel))
+
              
                 self.formation_goals[i][:,2] = self.formation_center_pos[:, 2]
                 for dim in range(self.world.batch_dim):
@@ -4800,19 +4809,29 @@ class Scenario(BaseScenario):
     def set_last_policy_output(self, output):
         self.last_policy_output = copy.deepcopy(output)
 
+    def update_laser_observation_history(self, latest_batch_laser):
+        self.batch_laser_sequence[:, 2, :] = self.batch_laser_sequence[:, 1, :]
+        self.batch_laser_sequence[:, 1, :] = self.batch_laser_sequence[:, 0, :]
+        self.batch_laser_sequence[:, 0, :] = latest_batch_laser
+
+
 
 
     def observation(self, agent: Agent):
         MAX_LASER_RANGE = 3.5  # 最大激光检测范围（单位：米）
-        LASER_BINS = 90        # 360度分成的激光束数量
         BATCH_DIM = self.world.batch_dim  # 获取batch维度
         
         current_agent_index = self.world.agents.index(agent)
-        
+        def add_noise(tensor, noise_level=0.1):
+            noise = torch.randn_like(tensor)
+            # Scale the noise by noise_level
+            noise = noise * noise_level
+            # Add the noise to the original tensor
+            return tensor + noise
         # 领队机器人处理感知数据
         if current_agent_index == 0:
             # 初始化batch维度的容器
-            batch_laser = torch.zeros((BATCH_DIM, 1, LASER_BINS), 
+            batch_laser = torch.zeros((BATCH_DIM, 1, self.LASER_BINS), 
                                     device=self.device)
             batch_relative_pos = []
             
@@ -4822,7 +4841,7 @@ class Scenario(BaseScenario):
                 leader_rot = self.leader_robot.state.rot[d]  # 朝向角度（弧度）
                 
                 # 初始化激光扫描数据
-                laser_scan = torch.full((LASER_BINS,), MAX_LASER_RANGE, 
+                laser_scan = torch.full((self.LASER_BINS,), MAX_LASER_RANGE, 
                                     dtype=torch.float32, device=self.device)
                 
                 # 获取附近障碍物
@@ -4836,11 +4855,12 @@ class Scenario(BaseScenario):
                 if near_obstacles.numel() > 0:
                     rel_pos = near_obstacles - leader_pos
                     distances = torch.norm(rel_pos, dim=1)
+                    distances = add_noise(distances, self.evaluation_noise)
                     angles = (torch.atan2(rel_pos[:,1], rel_pos[:,0]) - leader_rot) % (2 * torch.pi)
                     
                     # 计算激光束索引
-                    bin_indices = (angles / (2 * torch.pi) * LASER_BINS).long()
-                    bin_indices = torch.clamp(bin_indices, 0, LASER_BINS-1)
+                    bin_indices = (angles / (2 * torch.pi) * self.LASER_BINS).long()
+                    bin_indices = torch.clamp(bin_indices, 0, self.LASER_BINS-1)
                     
                     # 更新激光扫描数据（保留最近障碍物）
                     for idx, bin_idx in enumerate(bin_indices):
@@ -4849,7 +4869,7 @@ class Scenario(BaseScenario):
                 
                 # 存储batch维度的激光数据
                 batch_laser[d] = laser_scan.unsqueeze(0)  # 添加通道维度
-                
+                self.update_laser_observation_history(batch_laser)
                 # 计算相对位姿
                 relative_poses = []
                 relative_poses.append(torch.zeros(3, device=self.device).unsqueeze(dim=1))  # 新增这行：[0.0, 0.0, 0.0]
@@ -4872,17 +4892,30 @@ class Scenario(BaseScenario):
                     batch_relative_pos.append(torch.stack(relative_poses))
                 else:
                     batch_relative_pos.append(torch.empty((0, 3), device=self.device))
+
+
+                nominal_formation_tensor = torch.zeros((self.world.batch_dim, self.n_agents, 3), device=self.device)
             
+                # Define nominal positions for agents (assuming 5 agents)
+                # nominal_positions_x = [0.0, -0.3536, -0.3536, -0.7071, -0.7071]
+                # nominal_positions_y = [0.0, 0.35366, -0.3536, 0.7071, -0.7071]
+                nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+                nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+                for i, nomi_agent in enumerate(self.world.agents):
+                    nominal_formation_tensor[:, i, 0] = nominal_positions_x[i]
+                    nominal_formation_tensor[:, i, 1] = nominal_positions_y[i]
+                    nominal_formation_tensor[:, i, 2] = 0.0
             # 转换为batch维度优先的张量
             return {
-                'laser': batch_laser,  # shape [B, 1, 360]
-                'relative_pos': torch.stack(batch_relative_pos)  # shape [B, N, 3]
+                'laser': self.batch_laser_sequence,  # shape [B, self.laser_history_length, LASER_BIN]
+                'relative_pos': torch.stack(batch_relative_pos),  # shape [B, N, 3]
+                'nominal_pos': nominal_formation_tensor
             }
         
         # 非领队机器人返回空数据（保持batch维度）
         else:
             return {
-                'laser': torch.zeros((BATCH_DIM, 1, LASER_BINS), device=self.device),
+                'laser': torch.zeros((BATCH_DIM, 1, self.LASER_BINS), device=self.device),
                 'relative_pos': torch.zeros((BATCH_DIM, 0, 3), device=self.device)
             }
 
@@ -5080,6 +5113,21 @@ class Scenario(BaseScenario):
         # # Apply rotation: [batch_dim, 2, 2] x [batch_dim, 2, 1] -> [batch_dim, 2, 1]
         optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2]
         optimized_target_pose = torch.cat([optimized_target_pos, translated_agent_rot], dim=1)
+
+        if self.is_current_step_reset == True:
+            agent_real_vel = agent.state.vel
+            agent_real_ang_vel = agent.state.ang_vel
+        else:
+            agent_real_vel = (agent.state.pos - agent.prev_state_pos)*10
+            agent_real_ang_vel = (agent.state.rot - agent.prev_state_rot)*10
+
+        print("agent:{} agent_real_vel:{}".format(current_agent_index, agent_real_vel))
+        print("agent:{} agent_real_ang_vel:{}".format(current_agent_index, agent_real_ang_vel))
+        print("agent:{}, state vel:{}".format(current_agent_index, agent.state.vel ))
+        print("agent {} pos:{}".format(current_agent_index, agent.state.pos))
+        agent.prev_state_pos = copy.deepcopy(agent.state.pos)
+        agent.prev_state_rot = copy.deepcopy(agent.state.rot)
+
         # print("optimized_target_pose:{}".format(optimized_target_pose.shape))
         if current_agent_index == 0:
             return {
@@ -5097,6 +5145,8 @@ class Scenario(BaseScenario):
                 "agent_connection_rew": agent.connection_rew,
                 "agent_diff_rew": agent.action_diff_rew,
                 "agent_target_collision": agent.target_collision_rew,
+                "agent_vel": torch.zeros_like(agent_real_vel),
+                "agent_ang_vel": torch.zeros_like(agent_real_ang_vel),
             }
         else:
             return {
@@ -5110,6 +5160,11 @@ class Scenario(BaseScenario):
                 "agent_connection_rew": agent.connection_rew,
                 "agent_diff_rew": agent.action_diff_rew,
                 "agent_target_collision": agent.target_collision_rew,
+                "agent_vel": agent_real_vel,
+                # "agent_vel": agent.state.vel,
+                "agent_ang_vel": agent_real_ang_vel,
+                # "agent_ang_vel": agent.state.ang_vel,
+
             }
     
     def extra_render(self, env_index: int = 0) -> "List[Geom]":

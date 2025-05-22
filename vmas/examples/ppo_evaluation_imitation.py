@@ -359,7 +359,7 @@ total_no_collision_num = 0
 total_connection_num = 0
 for epoch_restart in range(eval_epoch_restart_num):
     env = VMASWrapper(
-        scenario_name="formation_control_teacher_graph_obs_cuda1",
+        scenario_name="formation_control_teacher_graph_obs_cuda1_conv_nominal",
         num_envs=1,
         device=device,
         continuous_actions=True,

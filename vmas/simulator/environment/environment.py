@@ -91,6 +91,10 @@ class Environment(TorchVectorizedObject):
         return result[0] if result and len(result) == 1 else result
     
 
+    def get_leader_paths(self):
+        leader_paths = self.scenario.get_leader_paths()
+        return leader_paths
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -252,8 +256,10 @@ class Environment(TorchVectorizedObject):
                 actions[i] = torch.tensor(
                     actions[i], dtype=torch.float32, device=self.device
                 )
+            
             if len(actions[i].shape) == 1:
-                actions[i].unsqueeze_(-1)
+                actions[i].unsqueeze_(0)
+            # print("action i shape:{}".format(actions[i].shape))
             assert (
                 actions[i].shape[0] == self.num_envs
             ), f"Actions used in input of env must be of len {self.num_envs}, got {actions[i].shape[0]}"
@@ -270,6 +276,7 @@ class Environment(TorchVectorizedObject):
         # time1 = time.time()
         for agent in self.world.agents:
             self.scenario.env_process_action(agent)
+            # print("ENVIRONMENT: agent force:{}".format(agent.state.force))
         # print("process)action time:{}".format(time.time() - time1))
         # advance world state
 
@@ -288,7 +295,7 @@ class Environment(TorchVectorizedObject):
         return obs, rewards, dones, infos
 
     def done(self):
-        dones = self.scenario.done().clone()
+        dones = self.scenario.done().clone() 
         if self.max_steps is not None:
             dones += self.steps >= self.max_steps
         return dones
@@ -700,7 +707,7 @@ class Environment(TorchVectorizedObject):
             cam_range = torch.tensor([zoom, zoom / aspect_ratio], device=self.device)
         else:
             cam_range = torch.tensor([zoom * aspect_ratio, zoom], device=self.device)
-
+        shared_viewer = True
         if shared_viewer:
             # zoom out to fit everyone
             all_poses = torch.stack(
@@ -717,7 +724,7 @@ class Environment(TorchVectorizedObject):
                         torch.max(torch.abs(all_poses[:, Y])),
                     ]
                 )
-                + 2 * max_agent_radius
+                + 2 * max_agent_radius + 10
             )
 
             viewer_size = torch.maximum(
@@ -763,11 +770,12 @@ class Environment(TorchVectorizedObject):
             grid.set_color(*vmas.simulator.utils.Color.BLACK.value, alpha=0.3)
             self.viewer.add_onetime(grid)
 
-        self.viewer.add_onetime_list(self.scenario.extra_render(env_index))
 
         for entity in self.world.entities:
+            # print("RENDER entity:{}".format(entity.name))
             self.viewer.add_onetime_list(entity.render(env_index=env_index))
 
+        self.viewer.add_onetime_list(self.scenario.extra_render(env_index))
         # render to display or array
         return self.viewer.render(return_rgb_array=mode == "rgb_array")
 

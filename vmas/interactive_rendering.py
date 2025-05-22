@@ -16,7 +16,7 @@ from typing import Dict, Union
 import numpy as np
 from torch import Tensor
 
-from vmas.make_env import make_env
+from vmas.make_vmas_env import make_env
 from vmas.simulator.environment import Wrapper
 from vmas.simulator.environment.gym import GymWrapper
 from vmas.simulator.scenario import BaseScenario
@@ -296,7 +296,7 @@ class InteractiveEnv:
 def render_interactively(
     scenario: Union[str, BaseScenario],
     control_two_agents: bool = False,
-    display_info: bool = True,
+    display_info: bool = False,
     save_render: bool = False,
     **kwargs,
 ):
@@ -333,7 +333,7 @@ def render_interactively(
     InteractiveEnv(
         make_env(
             scenario=scenario,
-            num_envs=1,
+            num_envs=3,
             device="cpu",
             continuous_actions=True,
             wrapper=Wrapper.GYM,

@@ -157,7 +157,8 @@ class GATActor(nn.Module):
         x = torch.relu(x)
         x = self.conv3(x, edge_index, edge_attr)
         x = torch.relu(x)
-
+        print("x:{}".format(x.shape))
+        input("1")
         # Global graph embedding
         graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels * 8]
 

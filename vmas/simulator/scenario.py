@@ -88,7 +88,9 @@ class BaseScenario(ABC):
             agent.action_callback(self.world)
         # Customizable action processor
         self.process_action(agent)
+        # print("SCENARIO state force:{}".format(agent.state.force))
         agent.dynamics.check_and_process_action()
+        # print("POST SCENARIO state force:{}".format(agent.state.force))
 
     def env_process_action_collectively(self):
         pass

@@ -143,7 +143,7 @@ def use_vmas_env(
                 #         'edge_attr': edge_attr,
                 #     }
                 #     serializable_graph_list.append(graph_data)
-
+                print("info:{}".format(info))
                 # Collect optimized_target_pos for all agents
                 for agent in env.agents:
                     agent_name = agent.name

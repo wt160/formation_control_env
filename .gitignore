@@ -257,3 +257,10 @@ multiagent_training/outputs/**/*
 *.mp4
 *.pkl
 vmas/examples/runs/*
+vmas/examples/video/*
+vmas/examples/eva_video/*
+vmas/examples/data/*
+vmas/examples/collected_data/*
+vmas/examples/saved_policy/*
+vmas/examples/policy/*
+vmas/examples/models/*

@@ -13,6 +13,7 @@ import pickle
 from tensordict.nn import TensorDictModule
 import numpy as np
 import math
+import torch.nn.functional as F
 # Load the collected data
 
 
@@ -39,57 +40,54 @@ data_length = len(collected_data)
 for data_index, data_point in enumerate(collected_data):
     if data_index > data_length / 3:
         break
-    graph_data_list = data_point['graph_tensor']  # List of graphs with length batch_dim
-    optimized_target_pos = data_point['optimized_target_pos']  # Dict of agent positions with batch_dim
+    graph_data = data_point['graph_tensor']  # List of graphs with length batch_dim
+    optimized_target_vel = data_point['current_agent_vel']  # Dict of agent positions with batch_dim
 
-    agent_names = sorted(optimized_target_pos.keys())
+    agent_names = sorted(optimized_target_vel.keys())
     # optimized_target_pos: dict with keys as agent names and values as tensors of shape [batch_dim, 2]
 
-    batch_dim = len(graph_data_list)
-    for batch_idx in range(batch_dim):
-        # Get graph data for this batch index
-        graph_data = graph_data_list[batch_idx]
+    
 
-        # Reconstruct the PyG Data object
-        x = torch.tensor(graph_data['x'], dtype=torch.float, device="cpu")
-        edge_index = torch.tensor(graph_data['edge_index'], dtype=torch.long, device="cpu")
-        edge_attr = torch.tensor(graph_data['edge_attr'], dtype=torch.float, device="cpu") if graph_data['edge_attr'] is not None else None
+    # Reconstruct the PyG Data object
+    x = torch.tensor(graph_data['x'], dtype=torch.float, device="cpu")
+    edge_index = torch.tensor(graph_data['edge_index'], dtype=torch.long, device="cpu")
+    edge_attr = torch.tensor(graph_data['edge_attr'], dtype=torch.float, device="cpu") if graph_data['edge_attr'] is not None else None
 
-        # Use the full x as features
-        features = x  # No separation of categories
-        num_nodes = x.shape[0]
-        # Create Data object
-        data = Data(x=features, edge_index=edge_index, edge_attr=edge_attr)
+    # Use the full x as features
+    features = x  # No separation of categories
+    num_nodes = x.shape[0]
+    # Create Data object
+    data = Data(x=features, edge_index=edge_index, edge_attr=edge_attr)
 
-        # Prepare target positions for this batch index
-        target_positions = [optimized_target_pos[name][batch_idx] for name in agent_names]  # List of tensors [2]
-        target_positions = np.stack(target_positions)  # Shape: [num_agents, 2]
-        data.y = torch.tensor(target_positions, dtype=torch.float, device="cpu")
-        target_positions_tensor = torch.tensor(target_positions, dtype=torch.float, device="cpu")
-        # Append to dataset
-        # if num_nodes > 5:
-        dataset.append(data)
-        for noise_num in range(noise_total_num):
-            # Clone the original features so we don't modify them in-place
-            noise_features = features.clone()
+    # Prepare target positions for this batch index
+    target_positions = [optimized_target_vel[name] for name in agent_names]  # List of tensors [2]
+    target_positions = np.stack(target_positions)  # Shape: [num_agents, 2]
+    data.y = torch.tensor(target_positions, dtype=torch.float, device="cpu")
+    target_positions_tensor = torch.tensor(target_positions, dtype=torch.float, device="cpu")
+    # Append to dataset
+    # if num_nodes > 5:
+    dataset.append(data)
+    for noise_num in range(noise_total_num):
+        # Clone the original features so we don't modify them in-place
+        noise_features = features.clone()
 
-            # Add noise to the current relative position part of the features
-            # Assuming the current relative positions are in columns [4:6] for the first 5 agents
-            # Adjust indices based on your actual feature layout
-            # For each noise_num, add a random displacement
-            noise = -0.25 + 0.5*torch.rand((5, 2), device="cpu")  # shape: [5, 2]
-            noise_features[:5, 4:6] += noise
-            angle_noise =-math.pi*0.3 +  math.pi*0.6*torch.rand((5,1), device="cpu")
-            angle_noise = angle_noise.squeeze(dim=1)
-            noise_features[:5, 6] += angle_noise
+        # Add noise to the current relative position part of the features
+        # Assuming the current relative positions are in columns [4:6] for the first 5 agents
+        # Adjust indices based on your actual feature layout
+        # For each noise_num, add a random displacement
+        noise = -0.25 + 0.5*torch.rand((5, 2), device="cpu")  # shape: [5, 2]
+        noise_features[:5, 4:6] += noise
+        angle_noise =-math.pi*0.3 +  math.pi*0.6*torch.rand((5,1), device="cpu")
+        angle_noise = angle_noise.squeeze(dim=1)
+        noise_features[:5, 6] += angle_noise
 
-            num_agents_to_noise = max(0, noise_features.shape[0] - 5)  # Number of agents beyond the first 5
-            noise = -0.1 + 0.2 * torch.rand((num_agents_to_noise, 2), device="cpu")  
-            if noise_features.shape[0] > 5:
-                noise_features[5:, :2] += noise
-            # Create a new Data object with noisy features
-            noisy_data = Data(x=noise_features, edge_index=edge_index, edge_attr=edge_attr, y=target_positions_tensor)
-            dataset.append(noisy_data)
+        num_agents_to_noise = max(0, noise_features.shape[0] - 5)  # Number of agents beyond the first 5
+        noise = -0.1 + 0.2 * torch.rand((num_agents_to_noise, 2), device="cpu")  
+        if noise_features.shape[0] > 5:
+            noise_features[5:, :2] += noise
+        # Create a new Data object with noisy features
+        noisy_data = Data(x=noise_features, edge_index=edge_index, edge_attr=edge_attr, y=target_positions_tensor)
+        dataset.append(noisy_data)
 
 # Shuffle and split dataset
 np.random.shuffle(dataset)
@@ -201,7 +199,7 @@ class GATModel(nn.Module):
 
 num_agents=5
 sample_graph = dataset[0]
-in_channels = 7
+in_channels = 29
 hidden_dim = 64
 output_dim = 3  # Assuming 2D positions
 
@@ -218,7 +216,7 @@ criterion = nn.MSELoss()
 optimizer = optim.Adam(gnn_actor_net.parameters(), lr=0.001)
 
 # Training and validation
-num_epochs = 4
+num_epochs = 40
 best_val_loss = float('inf')
 
 for epoch in range(num_epochs):

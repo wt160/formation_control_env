@@ -23,7 +23,7 @@ ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 VIEWER_MIN_ZOOM = 1.2
 INITIAL_VIEWER_SIZE = (700, 700)
 LINE_MIN_DIST = 4 / 6e2
-COLLISION_FORCE = 100
+COLLISION_FORCE = 300
 # JOINT_FORCE = 130
 JOINT_FORCE = 0
 
@@ -151,7 +151,8 @@ def extract_nested_with_index(data: Union[Tensor, Dict[str, Tensor]], index: int
             key: extract_nested_with_index(value, index) for key, value in data.items()
         }
     else:
-        raise NotImplementedError(f"Invalid type of data {data}")
+        return data
+        # raise NotImplementedError(f"Invalid type of data {data}")
 
 
 class TorchUtils:
