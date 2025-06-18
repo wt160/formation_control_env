@@ -69,6 +69,7 @@ class Lidar(Sensor):
         self._last_measurement = None
         self._entity_filter = entity_filter
         self._render_color = render_color
+        self._num_rays = n_rays
 
     def to(self, device: torch.device):
         self._angles = self._angles.to(device)
@@ -83,26 +84,72 @@ class Lidar(Sensor):
     ):
         self._entity_filter = entity_filter
 
+
     def measure(self):
-        dists = []
-        # print("measure angles:{}".format(self._angles))
-        for angle in self._angles.unbind(1):
-            dists.append(
-                self._world.cast_ray(
-                    self.agent,
-                    angle + self.agent.state.rot.squeeze(-1),
-                    max_range=self._max_range,
-                    entity_filter=self.entity_filter,
-                )
-            )
-        measurement = torch.stack(dists, dim=1)
+        agent_pos = self.agent.state.pos  # Expected Shape: [batch_dim_env, 2]
+        agent_rot = self.agent.state.rot.squeeze(-1) # Expected Shape: [batch_dim_env]
+        
+        batch_dim_env = agent_pos.shape[0]
+        if batch_dim_env == 0: 
+            return torch.empty(0, self._num_rays, device=self.device) # Use self._num_rays
+            
+        # self._angles is 1D [self._num_rays]
+        # agent_rot is 1D [batch_dim_env]
+        # Broadcasting:
+        # self._angles.unsqueeze(0) -> [1, self._num_rays]
+        # agent_rot.unsqueeze(1) -> [batch_dim_env, 1]
+        # Result: world_angles_batched -> [batch_dim_env, self._num_rays]
+        world_angles_batched = self._angles.unsqueeze(0) + agent_rot.unsqueeze(1)
+        
+        # agent_pos_expanded: [batch_dim_env, self._num_rays, 2]
+        agent_pos_expanded = agent_pos.unsqueeze(1).expand(-1, self._num_rays, 2)
+
+        origins_flat = agent_pos_expanded.reshape(-1, 2) # Shape: [batch_dim_env * self._num_rays, 2]
+        angles_flat = world_angles_batched.reshape(-1)   # Shape: [batch_dim_env * self._num_rays]
+        
+        # env_indices_for_rays_flat maps each ray in the flattened batch to its original environment index
+        env_indices_for_rays_flat = torch.arange(batch_dim_env).repeat_interleave(self._num_rays)
+
+        all_rays_distances_flat = self._world.cast_ray(
+            ray_origins=origins_flat,
+            ray_world_angles=angles_flat,
+            bitmap_env_indices_for_rays=env_indices_for_rays_flat, 
+            max_range=self._max_range,
+            casting_entity=self.agent, 
+            entity_filter=self.entity_filter
+        )
+        
+        measurement = all_rays_distances_flat.view(batch_dim_env, self._num_rays)
         # print("measure:{}".format(measurement))
         self._last_measurement = measurement
         return measurement
 
+
+
+    # def measure(self):
+    #     dists = []
+    #     import time
+    #     print("measure angles:{}".format(self._angles))
+    #     measure_start = time.time()
+    #     for angle in self._angles.unbind(1):
+    #         print("angle:{}".format(angle))
+    #         dists.append(
+    #             self._world.cast_ray(
+    #                 self.agent,
+    #                 angle + self.agent.state.rot.squeeze(-1),
+    #                 max_range=self._max_range,
+    #                 entity_filter=self.entity_filter,
+    #             )
+    #         )
+    #     print("measure time:{}".format(time.time() - measure_start))
+    #     measurement = torch.stack(dists, dim=1)
+    #     # print("measure:{}".format(measurement))
+    #     self._last_measurement = measurement
+    #     return measurement
+
     def render(self, env_index: int = 0) -> "List[Geom]":
         from vmas.simulator import rendering
-        return
+        # return
         # print("render!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         # print("render angles:{}".format(self._angles))
         geoms: List[rendering.Geom] = []

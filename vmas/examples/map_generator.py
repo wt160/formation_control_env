@@ -20,7 +20,7 @@ class AdvancedMapGenerator:
 
         self.clutter_config = {
             'node_variety': [(5, 0.2), (6, 0.3), (7, 0.4), (8, 0.3), (9, 0.4), (10, 0.1)],  # (节点数, 凹度概率)
-            'size_range': (5, 10),  # 像素单位
+            'size_range': (10, 20),  # 像素单位
             'density_curve': lambda x: 1/(1+np.exp(-0.03*(x-50)))  # 大小分布曲线
 
 
@@ -46,26 +46,26 @@ class AdvancedMapGenerator:
         obstacle_min_dist = 50
         clutter_min_dist = 70
         if level == 0:
-            obstacle_min_dist = 100
+            obstacle_min_dist = 110
             clutter_min_dist = 70
         elif level == 1:
-            obstacle_min_dist = 90
+            obstacle_min_dist = 100
             clutter_min_dist = 60
 
         elif level == 2:
-            obstacle_min_dist = 80
+            obstacle_min_dist = 90
             clutter_min_dist = 50
 
         elif level == 3:
-            obstacle_min_dist = 70
+            obstacle_min_dist = 80
             clutter_min_dist = 40
 
         elif level == 4:
-            obstacle_min_dist = 60
+            obstacle_min_dist = 70
             clutter_min_dist = 30
 
         elif level == 5:
-            obstacle_min_dist = 50
+            obstacle_min_dist = 60
             clutter_min_dist = 20
 
 
@@ -82,19 +82,127 @@ class AdvancedMapGenerator:
         elif type == "obstacle_and_clutter":
             base = self.create_obstacle_layer(base, min_dist=obstacle_min_dist)
             base = self.create_clutter_layer(base, min_dist=clutter_min_dist)
+        elif type == "tunnel":
+            print("create tunnel layer")
+            base = self.create_tunnel_layer(base)
+        elif type == "empty":
+            base = self.create_empty_layer(base)
+            # Tunnel maps have a predefined structure and don't need the standard
+            # connectivity optimization, which would create shortcuts through walls.
+
 
 
         base = self.add_central_clear_area(base)
         print("morphological enhance")
         # 阶段2：形态学细节增强
-        base = self.morphological_detail(base)
+        # base = self.morphological_detail(base)
         
 
         print("connectivity optimization")
         # 阶段3：多层次连通优化
-        return self.connectivity_engine.optimize(base)
+        return base
+        # return self.connectivity_engine.optimize(base)
         # return base
-    
+
+    def create_arc_tube_obstacle(self, center, base_radius, start_angle, end_angle, thickness, irregularity=0.15, segments=30):
+        """
+        Generates a single, irregular arc-shaped tube obstacle.
+        :param center: Tuple (x, y) for the center of the arc.
+        :param base_radius: The average distance from the center to the midline of the arc.
+        :param start_angle: The starting angle of the arc in degrees.
+        :param end_angle: The ending angle of the arc in degrees.
+        :param thickness: The average thickness of the arc tube.
+        :param irregularity: A factor to control the "wobbliness" of the arc's shape.
+        :param segments: The number of line segments to use to approximate the curve.
+        :return: A numpy array of points defining the polygon of the obstacle.
+        """
+        outer_arc = []
+        inner_arc = []
+
+        # Generate points along the arc
+        for i in range(segments + 1):
+            # Interpolate angle and convert to radians
+            angle_rad = math.radians(start_angle + (end_angle - start_angle) * i / segments)
+
+            # Apply irregularity to radius and thickness for a more organic shape
+            current_radius = base_radius * (1 + random.uniform(-irregularity, irregularity) * 0.5)
+            current_thickness = thickness * (1 + random.uniform(-irregularity, irregularity))
+
+            # Calculate points for the outer and inner edges of the arc
+            outer_x = center[0] + (current_radius + current_thickness / 2) * math.cos(angle_rad)
+            outer_y = center[1] + (current_radius + current_thickness / 2) * math.sin(angle_rad)
+            outer_arc.append([int(outer_x), int(outer_y)])
+
+            inner_x = center[0] + (current_radius - current_thickness / 2) * math.cos(angle_rad)
+            inner_y = center[1] + (current_radius - current_thickness / 2) * math.sin(angle_rad)
+            inner_arc.append([int(inner_x), int(inner_y)])
+        
+        # Combine the outer and inner arc points to form a closed polygon.
+        # The inner arc points are added in reverse to create a continuous path for the polygon boundary.
+        polygon_points = np.array(outer_arc + inner_arc[::-1], dtype=np.int32)
+        return polygon_points
+
+    def create_empty_layer(self, base):
+        base.fill(255) 
+        return base
+
+    def create_tunnel_layer(self, base):
+        """
+        Creates a map with several arc-tube obstacles surrounding a central area,
+        forming tunnels between them, with a controlled tunnel width.
+        """
+        base.fill(255)  # Start with a completely white (free space) map
+        center = (self.size // 2, self.size // 2)
+
+        # --- Configuration for the arc-tube tunnel style ---
+        num_arcs = random.randint(3, 7)
+        mean_radius = self.size * random.uniform(0.25, 0.35)
+        thickness = self.size * random.uniform(0.03, 0.15)
+        
+        # --- New logic to control tunnel width ---
+        # Define the desired tunnel width (gap) in degrees from config
+        # target_gap_angle = random.uniform(*self.tunnel_config['width_range_deg'])
+        target_gap_angle = random.uniform(8,13)
+        
+        total_gap_angle = num_arcs * target_gap_angle
+
+        # Ensure total gap is not excessive, leaving space for arcs
+        if total_gap_angle >= 300:
+            total_gap_angle = 300 # Cap the total gap angle
+
+        # Calculate the average arc length based on the required gaps
+        total_arc_angle = 360 - total_gap_angle
+        arc_length_mean = total_arc_angle / num_arcs if num_arcs > 0 else 0
+        # --- End of new logic ---
+
+        current_angle = random.uniform(0, 360)
+
+        for _ in range(num_arcs):
+            # Randomize parameters for this specific arc for variety
+            # Use less variance to maintain tunnel width more consistently
+            arc_length = arc_length_mean + random.uniform(-10, 3)
+            start_angle = current_angle
+            end_angle = start_angle + arc_length
+
+            # Generate the polygon for the current arc-shaped obstacle
+            arc_poly = self.create_arc_tube_obstacle(
+                center=center,
+                base_radius=mean_radius * random.uniform(0.7, 1.2),
+                start_angle=start_angle,
+                end_angle=end_angle,
+                thickness=thickness * random.uniform(0.4, 1.9),
+                irregularity=0.2, # Controls how "wobbly" the arcs are
+                segments=10       # More segments for smoother curves
+            )
+            
+            # Draw the obstacle on the map
+            cv2.fillPoly(base, [arc_poly], 0) 
+
+            # Update the current_angle for the next arc, leaving a controlled gap
+            gap_angle = target_gap_angle + random.uniform(-1, 2)
+            current_angle = end_angle + gap_angle
+            
+        return base
     def add_structured_obstacles(self, base):
             """生成带门的墙体系统"""
             num_walls = random.randint(self.wall_config['min_walls'], 
@@ -850,7 +958,7 @@ def main():
     parser.add_argument('--version', action='version', version='v2.1.0')
     parser.add_argument('--type', type=str, default='obstacle_and_clutter')
     parser.add_argument('--level', type=int, default=0, choices=[0, 1, 2, 3, 4, 5])
-    parser.add_argument('--path', type=int, default=1, help='0-no path generated, 1 - generate paths')
+    parser.add_argument('--path', type=int, default=0, help='0-no path generated, 1 - generate paths')
     args = parser.parse_args()
 
     # 创建输出目录
@@ -877,7 +985,7 @@ def main():
             # 质量验证
             if validate_map(map_data):
             # if True:
-                filename = output_dir / f"map_{map_id}_{args.size}px.png"
+                filename = output_dir / f"map_{map_id}_{args.size}px_{args.type}.png"
                 print("before saving")
                 cv2.imwrite(str(filename), map_data)
                 print(f"已保存：{filename.name}")
@@ -932,10 +1040,10 @@ def validate_map(img):
         binary = img > 127  # Convert to binary (True for free space, False for obstacles)
     
     # Check obstacle ratio
-    obstacle_ratio = np.mean(img < 127) 
-    if not 0.2 < obstacle_ratio < 0.7:
-        print(f"障碍物比例异常：{obstacle_ratio:.2f}")
-        return False
+    # obstacle_ratio = np.mean(img < 127) 
+    # if not 0.2 < obstacle_ratio < 0.7:
+    #     print(f"障碍物比例异常：{obstacle_ratio:.2f}")
+    #     return False
     
     # Define the central clear area
     height, width = binary.shape

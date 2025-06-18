@@ -7,7 +7,7 @@ import os
 from PIL import Image
 import time
 import typing
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 import numpy as np
 import pickle
 from collections import deque
@@ -307,6 +307,7 @@ class Scenario(BaseScenario):
                 device=device
             )
         self.last_action_u = {}
+        self.current_action_mean = {}
         self.formation_goals = {}
         self.success_reconfigure_goals = {}
         self.formation_goals_landmark = {}
@@ -324,8 +325,14 @@ class Scenario(BaseScenario):
                 (batch_dim, 3),
                 device=device
             )
-            
-            
+            self.last_action_u[i] = torch.zeros(
+                (batch_dim, 3),
+                device=device
+            )
+            self.current_action_mean[i] = torch.zeros(
+                (batch_dim, 3),
+                device=device
+            )
             self.formation_goals_landmark[i] = Landmark(
                 name=f"formation goal{i}",
                 collide=False,
@@ -507,7 +514,12 @@ class Scenario(BaseScenario):
             device=device
         )
 
+        self.left_opening = 0.0
+        self.right_opening = 0.0
+        self.LIDAR_OPENING_SMOOTHING_ALPHA = 0.15 # HYPERPARAMETER: Lower value = more smoothing. Start with 0.1-0.3
 
+        self.smoothed_left_opening = torch.zeros(self.batch_dim, device=self.device)
+        self.smoothed_right_opening = torch.zeros(self.batch_dim, device=self.device)
 
         self.eva_collision_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
         #number of agents that are connected to leader
@@ -3243,7 +3255,13 @@ class Scenario(BaseScenario):
         # print("agent_pose_global shape:{}".format(agent_pose_global.shape))
         return agent_pose_global
 
-    
+    def set_action_mean(self, actions):
+        print("actions mean shape:{}".format(actions.shape))
+        #actions mean shape:torch.Size([20, 5, 3])
+        for i in range(self.n_agents):   
+            self.current_action_mean[i] = actions[:, i, :]
+            print("self last_actionu shape:{}, {}".format(i, self.current_action_mean[i].shape))
+        # self.last_action_u
 
     def get_leader_paths(self, max_trials=1000):
         """
@@ -3297,6 +3315,36 @@ class Scenario(BaseScenario):
                 # input("Leader's starting position is invalid or too close to obstacles")
                 return []
             
+
+            inflation_radius = 0.0
+            # if self.train_map_directory == "train_maps_0_clutter":
+            #     inflation_radius = 3.0
+            # elif self.train_map_directory == "train_maps_1_clutter":
+            #     inflation_radius = 2.5
+            # elif self.train_map_directory == "train_maps_2_clutter":
+            #     inflation_radius = 2.0
+            # elif self.train_map_directory == "train_maps_3_clutter":
+            #     inflation_radius = 1.5
+            # elif self.train_map_directory == "train_maps_4_clutter":
+            #     inflation_radius = 1.0
+            # elif self.train_map_directory == "train_maps_5_clutter":
+            #     inflation_radius = 0.5
+
+            if self.train_map_directory == "train_maps_0_clutter":
+                inflation_radius = 0.5
+            elif self.train_map_directory == "train_maps_1_clutter":
+                inflation_radius = 0.5
+            elif self.train_map_directory == "train_maps_2_clutter":
+                inflation_radius = 0.5
+            elif self.train_map_directory == "train_maps_3_clutter":
+                inflation_radius = 0.5
+            elif self.train_map_directory == "train_maps_4_clutter":
+                inflation_radius = 0.5
+            elif self.train_map_directory == "train_maps_5_clutter":
+                inflation_radius = 0.5
+
+
+
             # Try finding a path for max_trials attempts
             for trial in range(max_trials):
                 # Randomly pick a target point
@@ -3327,7 +3375,9 @@ class Scenario(BaseScenario):
                     target_coord = (target_y, target_x)
                     
                     # Ensure target point is valid and safe
-                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / scale):
+
+
+                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / scale + inflation_radius):
                         target_found = True
                         break
                         
@@ -3336,7 +3386,7 @@ class Scenario(BaseScenario):
                     continue
                 # print("safe buffer:{}".format(agent_radius / scale))
                 # Find path using A* algorithm with safety buffer for agent radius
-                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / scale + 1.0))
+                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / scale + inflation_radius))
                 
                 # If path found, simplify it and convert back to world coordinates
                 if path:
@@ -3661,7 +3711,7 @@ class Scenario(BaseScenario):
                 ang_vel[env_idx] = angular_gain * angle_diff
                 
                 # Set linear velocity based on distance and angle alignment
-                max_speed = 0.2  # Maximum speed
+                max_speed = 0.4  # Maximum speed
                 
                 # Reduce speed when not well-aligned with the target
                 alignment_factor = torch.cos(angle_diff)
@@ -4562,8 +4612,8 @@ class Scenario(BaseScenario):
     def single_agent_collision_obstacle_rew(self, agent):
         #agent.collision_obstacle_rew is of shape torch.zeros(batch_dim, device=device)
         # self.current_lidar_reading  is of shape [batch_size, lidar_ray_num] 
-        self.LIDAR_DANGER_THRESHOLD = 0.3  # meters
-        self.LIDAR_CRITICAL_DISTANCE = 0.1 # meters
+        self.LIDAR_DANGER_THRESHOLD = 0.2  # meters
+        self.LIDAR_CRITICAL_DISTANCE = 0.05 # meters
         self.CRITICAL_DISTANCE_PENALTY = -10.0
         self.NORMAL_DANGER_PENALTY_SCALE = -2.0 # Adjusted scale for more impact
         current_agent_index = self.world.agents.index(agent)
@@ -4707,17 +4757,18 @@ class Scenario(BaseScenario):
 
     
     def compute_group_center_reward(self):
-        self.VIRTUAL_CENTER_RELATIVE_X = -0.25  # meters (target behind leader)
+        
+        self.VIRTUAL_CENTER_RELATIVE_X = -1.8  # meters (target behind leader)
         self.VIRTUAL_CENTER_RELATIVE_Y = 0.0    # meters (target centered with leader)
         self.VIRTUAL_CENTER_RELATIVE_THETA = 0.0 # radians (target same orientation as leader)
         
         self.GROUP_CENTER_POS_REWARD_SCALE = -1.0
         self.GROUP_CENTER_ORIENT_REWARD_SCALE = -0.5
         
-        self.RECTANGLE_CENTER_X_OFFSET = -0.5  # Longitudinal offset of rectangle center from leader (negative for behind)
+        self.RECTANGLE_CENTER_X_OFFSET = -3.0  # Longitudinal offset of rectangle center from leader (negative for behind)
         self.RECTANGLE_LATERAL_HALFWIDTH = 0.4   # Half-width (y-extent in leader's frame)
-        self.RECTANGLE_LONGITUDINAL_HALFLENGTH = 1.2 # Half-length (x-extent in leader's frame, around its center_x_offset)
-        self.OUT_OF_RECTANGLE_PENALTY_SCALE = -2.0 # Penalty scale for being outside
+        self.RECTANGLE_LONGITUDINAL_HALFLENGTH = 3 # Half-length (x-extent in leader's frame, around its center_x_offset)
+        self.OUT_OF_RECTANGLE_PENALTY_SCALE = -10.0 # Penalty scale for being outside
        
         follower_agents = []
         for i, agent in enumerate(self.world.agents):
@@ -4754,8 +4805,18 @@ class Scenario(BaseScenario):
         cos_l_orient = torch.cos(leader_orient).squeeze(-1)
         sin_l_orient = torch.sin(leader_orient).squeeze(-1)
 
-        global_offset_x = rel_x_vc * cos_l_orient - rel_y_vc * sin_l_orient
-        global_offset_y = rel_x_vc * sin_l_orient + rel_y_vc * cos_l_orient
+        is_line_condition = (self.smoothed_left_opening < 0.001) & (self.smoothed_right_opening < 0.001)
+        # is_line_condition = (self.smoothed_left_opening < 0.3  or self.smoothed_right_opening < 0.3)
+        global_offset_x = torch.where(is_line_condition, 
+            (-3.0) * cos_l_orient - rel_y_vc * sin_l_orient,
+            (-1.8) * cos_l_orient - rel_y_vc * sin_l_orient)
+        # global_offset_x = rel_x_vc * cos_l_orient - rel_y_vc * sin_l_orient
+        # print("global_offset_x shape:{}".format(global_offset_x.shape))
+        # input("1")
+        global_offset_y = torch.where(is_line_condition, 
+            (-3.0) * sin_l_orient + rel_y_vc * cos_l_orient,
+            (-1.8) * sin_l_orient + rel_y_vc * cos_l_orient)
+        # global_offset_y = rel_x_vc * sin_l_orient + rel_y_vc * cos_l_orient
         global_offset = torch.stack([global_offset_x, global_offset_y], dim=1)
         desired_virtual_pos_global = leader_pos + global_offset
         desired_virtual_orient_global = self._normalize_angle(leader_orient + self.VIRTUAL_CENTER_RELATIVE_THETA)
@@ -4789,9 +4850,23 @@ class Scenario(BaseScenario):
         # Rectangle center is at (self.RECTANGLE_CENTER_X_OFFSET, 0) in leader's local frame
         rect_local_min_x = self.RECTANGLE_CENTER_X_OFFSET - self.RECTANGLE_LONGITUDINAL_HALFLENGTH
         rect_local_max_x = self.RECTANGLE_CENTER_X_OFFSET + self.RECTANGLE_LONGITUDINAL_HALFLENGTH
-        rect_local_min_y = -self.RECTANGLE_LATERAL_HALFWIDTH
-        rect_local_max_y = self.RECTANGLE_LATERAL_HALFWIDTH
-
+        
+        # desired_rect_local_max_y = 3.0
+        # desired_rect_local_min_y = -3.0
+        desired_rect_local_max_y = self.smoothed_left_opening   # Based on left perceived opening
+        desired_rect_local_min_y = -(self.smoothed_right_opening) # Based on right perceived opening
+        
+        # Ensure rect_local_min_y is not positive, and rect_local_max_y is not negative
+        # Also ensure a minimum small opening if perceived opening is too small (e.g., < 0.5)
+        # These are element-wise operations for the batch
+        rect_local_min_y = torch.where(desired_rect_local_min_y >= -0.01, # If it's positive or too close to zero
+                                       torch.full_like(desired_rect_local_min_y, -0.01), 
+                                       desired_rect_local_min_y)
+        rect_local_max_y = torch.where(desired_rect_local_max_y <= 0.01,  # If it's negative or too close to zero
+                                       torch.full_like(desired_rect_local_max_y, 0.01),
+                                       desired_rect_local_max_y)
+        
+        
         # 3. Calculate out-of-bounds distance for each follower
         # For x-dimension (longitudinal)
         dx_low = torch.relu(rect_local_min_x - follower_pos_local_x)  # How much below min_x
@@ -4799,8 +4874,8 @@ class Scenario(BaseScenario):
         dx_out_sq = (dx_low + dx_high)**2 # Squared longitudinal out-of-bounds distance per follower
 
         # For y-dimension (lateral)
-        dy_low = torch.relu(rect_local_min_y - follower_pos_local_y)   # How much below min_y (more negative y_local)
-        dy_high = torch.relu(follower_pos_local_y - rect_local_max_y)  # How much above max_y (more positive y_local)
+        dy_low = torch.relu(rect_local_min_y.unsqueeze(1) - follower_pos_local_y)   # How much below min_y (more negative y_local)
+        dy_high = torch.relu(follower_pos_local_y - rect_local_max_y.unsqueeze(1))  # How much above max_y (more positive y_local)
         dy_out_sq = (dy_low + dy_high)**2 # Squared lateral out-of-bounds distance per follower
 
         # 4. Total out-of-bounds penalty per follower
@@ -4812,6 +4887,7 @@ class Scenario(BaseScenario):
 
         # --- Combine all reward components ---
         final_group_reward = group_center_cohesion_reward + total_out_of_rectangle_penalty
+        # final_group_reward = total_out_of_rectangle_penalty
         
         return final_group_reward
 
@@ -4994,8 +5070,9 @@ class Scenario(BaseScenario):
             self.group_center_diff_rew = self.compute_group_center_reward()
         #leader robot do not contribute to the reward
 
-        agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
+        # agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
         if self.env_type == "bitmap":
+            
             agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
         if is_first:
             # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
@@ -5031,9 +5108,14 @@ class Scenario(BaseScenario):
         # pos_reward =  agent.pos_rew
         if current_agent_index != 0:
             if (current_agent_index in self.last_action_u) == False:
-                self.last_action_u[current_agent_index] = agent.action.u
-            agent.action_diff_rew = -(torch.norm(agent.action.u - self.last_action_u[current_agent_index], dim=1) -0.05)
+                self.last_action_u[current_agent_index] = copy.deepcopy(self.current_action_mean[current_agent_index])
+            agent.action_diff_rew = -torch.norm(self.current_action_mean[current_agent_index] - self.last_action_u[current_agent_index], dim=1)
+
+            self.last_action_u[current_agent_index] = copy.deepcopy(self.current_action_mean[current_agent_index])
             agent.angle_diff_with_leader_rew = -torch.norm(agent.state.rot - self.leader_agent.state.rot, dim=1)
+        else:
+            pass
+            # self.last_action_u[current_agent_index] = copy.deepcopy(agent.action.u)
         # agent_direction_align_reward = self.agent_velocity_target_direction_alignment_reward(agent)
         # print("agent agent_collision_rew shape:{}".format(agent.agent_collision_rew.shape))
         # angle_reward = self.angle_rew if self.shared_rew else agent.angle_rew
@@ -5043,9 +5125,9 @@ class Scenario(BaseScenario):
         # return agent.agent_collision_rew + agent.connection_rew + agent.action_diff_rew + agent.formation_rew
         agent.agent_collision_rew = 1000*agent.agent_collision_rew
         agent.connection_rew = 30*agent.connection_rew
-        agent.action_diff_rew = 0.4*agent.action_diff_rew
+        agent.action_diff_rew = 50*agent.action_diff_rew
         agent.angle_diff_with_leader_rew = 0.8*agent.angle_diff_with_leader_rew
-        agent.collision_obstacle_rew = 0.05* agent.collision_obstacle_rew
+        agent.collision_obstacle_rew = 0.03* agent.collision_obstacle_rew
         # agent.target_collision_rew = 10*agent.target_collision_rew
         # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
         # return agent.angle_diff_with_leader_rew + agent.agent_collision_rew + agent.connection_rew + agent.action_diff_rew + agent.target_collision_rew 
@@ -5054,8 +5136,19 @@ class Scenario(BaseScenario):
         if self.env_type == "bitmap":
             # return agent.pos_rew
             # return agent.group_center_rew + agent.agent_collision_rew
+            # return agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.collision_obstacle_rew + agent.action_diff_rew
+            # rewards_setup2 = agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew
+            # rewards_setup1 = agent.pos_rew + agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew
+            # is_clutter_condition = (self.smoothed_left_opening < 1.2) & (self.smoothed_right_opening < 1.2)
+            # final_rewards = torch.where(
+            #     is_clutter_condition, 
+            #     rewards_setup2,       # Value if condition is True
+            #     rewards_setup1        # Value if condition is False
+            # ) 
+            
+            return agent.pos_rew + agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew
 
-            return agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.collision_obstacle_rew
+            # return agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.collision_obstacle_rew
         elif self.env_type == "bitmap_tunnel":
             return agent.connection_rew + agent.collision_obstacle_rew + agent.group_center_rew + agent.agent_collision_rew
         
@@ -5224,6 +5317,162 @@ class Scenario(BaseScenario):
     def set_last_policy_output(self, output):
         self.last_policy_output = copy.deepcopy(output)
 
+    def normalize_angles_for_opening_calculation(self, angles_0_to_2pi: torch.Tensor) -> torch.Tensor:
+        """
+        Normalizes angles from [0, 2*pi) to approximately [-pi, pi).
+        0 stays 0. Angles > pi are mapped to negative counterparts.
+        e.g., pi/2 -> pi/2; pi -> -pi (or pi); 3*pi/2 -> -pi/2.
+        """
+        angles_mod = angles_0_to_2pi % (2 * torch.pi)
+        # For angles in [pi, 2*pi), map them to [-pi, 0)
+        # For angles in [0, pi), they remain positive.
+        normalized_angles = torch.where(angles_mod >= torch.pi, angles_mod - 2 * torch.pi, angles_mod)
+        return normalized_angles
+
+    def compute_lidar_opening_raw(self, 
+        lidar_readings: torch.Tensor,    # Shape: [batch_dim, n_rays]
+        ray_angles_local_0_to_2pi: torch.Tensor,  # Shape: [batch_dim, n_rays], local frame, IN [0, 2*PI) RANGE
+        max_half_opening_width: float,   # Max possible opening on one side (e.g., nominal_formation_width / 2)
+        obstacle_distance_threshold: float, # Rays shorter than this are considered obstacles defining the opening edge
+        max_abs_angle_for_opening_calc: float = torch.pi / 2  # Max *absolute* normalized angle to consider (e.g., pi/2 for +/- 90 deg)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes the perceived left and right opening widths based on LiDAR readings.
+        Handles local ray angles provided in the [0, 2*pi) range by normalizing them.
+
+        Args:
+            lidar_readings: Distances measured by LiDAR rays.
+            ray_angles_local_0_to_2pi: Local angles of LiDAR rays (0 is front, CCW positive, range [0, 2*pi)).
+            max_half_opening_width: Maximum possible width for one side of the opening (cap).
+            obstacle_distance_threshold: LiDAR readings below this are treated as obstacles.
+            max_abs_angle_for_opening_calc: Defines the angular cone (e.g., +/- pi/2 from front)
+                                            to search for opening edges using normalized angles.
+
+        Returns:
+            A tuple (final_left_opening_abs_y, final_right_opening_abs_y):
+                - final_left_opening_abs_y: Tensor of shape [batch_dim] with the perceived opening
+                                        width to the left (positive y in local frame).
+                - final_right_opening_abs_y: Tensor of shape [batch_dim] with the perceived opening
+                                            width to the right (absolute value of y for right side).
+        """
+        batch_dim = lidar_readings.shape[0]
+        device = lidar_readings.device
+
+        if batch_dim == 0:
+            return torch.zeros(0, device=device), torch.zeros(0, device=device)
+
+        # Normalize angles to [-pi, pi) for easier left/right symmetric logic
+        # Positive normalized angles are left (CCW), negative are right (CW)
+        ray_angles_normalized = self.normalize_angles_for_opening_calculation(ray_angles_local_0_to_2pi)
+
+        # Create masks for relevant rays
+        # 1. Rays within the desired angular cone (using normalized angles)
+        frontal_cone_mask = torch.abs(ray_angles_normalized) <= max_abs_angle_for_opening_calc
+        
+        # 2. Rays that hit something close enough to be considered an obstacle
+        obstacle_hit_mask = lidar_readings < obstacle_distance_threshold
+        
+        # Combine masks: relevant obstacles are those within the frontal cone AND close enough
+        relevant_obstacle_mask = frontal_cone_mask & obstacle_hit_mask
+
+        # Calculate the local y-coordinate of all LiDAR hit points
+        # Use original ray_angles_local_0_to_2pi for sin calculation as it matches the frame definition
+        y_coords_of_hits = lidar_readings * torch.sin(ray_angles_local_0_to_2pi) # Shape: [batch_dim, n_rays]
+
+        # --- Determine Left Opening ---
+        # Left side corresponds to normalized angles > 0
+        # We are looking for the smallest positive y-coordinate among relevant obstacles on the left.
+        left_side_criteria = relevant_obstacle_mask & (ray_angles_normalized > 1e-4) # Epsilon for strictly positive
+
+        left_obstacle_y_values = torch.where(
+            left_side_criteria,
+            y_coords_of_hits, # y_coords are based on original angles, sin correctly handles this
+            torch.full_like(y_coords_of_hits, float('inf')) # Use 'inf' for non-obstacles on left
+        )
+        
+        left_opening_y, _ = torch.min(left_obstacle_y_values, dim=1) # Shape: [batch_dim]
+        
+        left_opening_y = torch.where(
+            torch.isinf(left_opening_y) | (left_opening_y < 0), # If no valid left obstacle or y became negative
+            torch.full_like(left_opening_y, max_half_opening_width),
+            left_opening_y
+        )
+        left_opening_y = torch.clamp(left_opening_y, 0, max_half_opening_width)
+
+        print("left_opening_y:{}".format(left_opening_y))
+        left_opening_y = left_opening_y - 0.7
+        print("left_opening_y after minus0.7:{}".format(left_opening_y))
+        left_opening_y = torch.where(
+             (left_opening_y < 0), # If no valid left obstacle or y became negative
+            torch.full_like(left_opening_y, 0.01),
+            left_opening_y
+        )
+        final_left_opening_abs_y = torch.clamp(left_opening_y, 0, max_half_opening_width)
+
+        # --- Determine Right Opening ---
+        # Right side corresponds to normalized angles < 0
+        # We are looking for the largest negative y-coordinate (closest to zero from negative side).
+        right_side_criteria = relevant_obstacle_mask & (ray_angles_normalized < -1e-4) # Epsilon for strictly negative
+
+        right_obstacle_y_values = torch.where(
+            right_side_criteria,
+            y_coords_of_hits, # y_coords are based on original angles
+            torch.full_like(y_coords_of_hits, float('-inf')) # Use '-inf' for non-obstacles on right
+        )
+
+        right_opening_y, _ = torch.max(right_obstacle_y_values, dim=1) # Shape: [batch_dim], will be negative if obstacle found
+
+        right_opening_y = torch.where(
+            torch.isinf(right_opening_y) | (right_opening_y > 0), # If no valid right obstacle or y became positive
+            torch.full_like(right_opening_y, -max_half_opening_width),
+            right_opening_y
+        )
+        right_opening_y = torch.clamp(right_opening_y, -max_half_opening_width, 0)
+        right_opening_y = right_opening_y + 0.7
+        right_opening_y = torch.where(
+             (right_opening_y > 0), # If no valid left obstacle or y became negative
+            torch.full_like(right_opening_y, -0.01),
+            right_opening_y
+        )
+
+        final_right_opening_abs_y = torch.clamp(torch.abs(right_opening_y), 0, max_half_opening_width)
+
+        return final_left_opening_abs_y, final_right_opening_abs_y
+
+    def update_and_get_smoothed_opening(
+        self,
+        raw_lidar_readings: torch.Tensor,
+        ray_angles: torch.Tensor,
+        max_half_opening_width: float,
+        obstacle_distance_threshold: float,
+        max_abs_angle_for_opening_calc: float = torch.pi / 2
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes the raw opening, applies Exponential Moving Average smoothing,
+        and returns the stable, smoothed opening values.
+        """
+        # Reset the smoothed values for environments that just finished an episode
+        # self.reset(dones=dones)
+
+        # 1. Get the current raw measurement
+        raw_left, raw_right = self.compute_lidar_opening_raw(
+            raw_lidar_readings,
+            ray_angles,
+            max_half_opening_width,
+            obstacle_distance_threshold,
+            max_abs_angle_for_opening_calc
+        )
+
+        # 2. Apply EMA filter
+        # smoothed_value = alpha * new_value + (1 - alpha) * old_smoothed_value
+        alpha = self.LIDAR_OPENING_SMOOTHING_ALPHA
+        
+        self.smoothed_left_opening = alpha * raw_left + (1 - alpha) * self.smoothed_left_opening
+        self.smoothed_right_opening = alpha * raw_right + (1 - alpha) * self.smoothed_right_opening
+
+        # Return the newly updated smoothed values
+        return self.smoothed_left_opening, self.smoothed_right_opening
+
     def observation(self, agent: Agent):
         # get_obs_time = time.time()
         goal_poses = []
@@ -5241,10 +5490,18 @@ class Scenario(BaseScenario):
         # print("index:{}".format(current_agent_index))
         if self.has_laser == True:
             # print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            lidar_observation_tensor = [agent.sensors[0]._max_range - agent.sensors[0].measure()]
+            raw_lidar_reading = agent.sensors[0].measure()
+            lidar_observation_tensor = [(agent.sensors[0]._max_range - raw_lidar_reading) / agent.sensors[0]._max_range]
             self.current_lidar_reading = lidar_observation_tensor[0]
+            if current_agent_index == 0:
+                # agnet.sensors[0].measure()   shape: [batch_size, lidar_ray_num]
+                # print("leader lidar reading shape:{}".format(agent.sensors[0].measure().shape))  
+                # print("angles shape:{}".format(agent.sensors[0]._angles.shape))
+                # print("angles:{}".format(agent.sensors[0]._angles ))
+                # self.left_opening, self.right_opening = self.compute_lidar_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 3.5, torch.pi*9.0/10.0)
             # print("lidar_observation_tensor :{}".format(self.current_lidar_reading.shape))
-        
+                self.smoothed_left_opening, self.smoothed_right_opening = self.update_and_get_smoothed_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 3.5, torch.pi*9.0/10.0)
+                print("left open:{}, right open:{}".format(self.smoothed_left_opening, self.smoothed_right_opening))
         # Define feature_length:
         # - Node features: max_nodes * num_node_features
         # - Edge indices: max_edges * 2
@@ -5301,8 +5558,8 @@ class Scenario(BaseScenario):
                     
                 relative_poses.append(torch.cat([rotated_pos, rel_theta_normalized.unsqueeze(0)]))
         # print("relative_pos shape:{}".format(torch.stack(relative_poses).shape))
-        
-        
+        opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=0)
+        print("opening_tensor shape:{}".format(opening_tensor.shape))
         if self.has_laser == True:
             return {
                 'laser': torch.tensor(lidar_observation_tensor[0]),  # shape [B, 20]
@@ -5310,7 +5567,9 @@ class Scenario(BaseScenario):
                 'nominal_pos_diff': nominal_formation_tensor - torch.stack(relative_poses).squeeze(dim=-1),
                 'nominal_pos': nominal_formation_tensor, 
                 'leader_vel': self.leader_agent.state.vel,
-                'leader_ang_vel': self.leader_agent.state.ang_vel
+                'leader_ang_vel': self.leader_agent.state.ang_vel,
+                'forward_opening': opening_tensor,
+                'last_action_u': self.last_action_u[current_agent_index],
             }    
         else:
             return {
@@ -5319,7 +5578,9 @@ class Scenario(BaseScenario):
                 'nominal_pos_diff': nominal_formation_tensor - torch.stack(relative_poses).squeeze(dim=-1),
                 'nominal_pos': nominal_formation_tensor, 
                 'leader_vel': self.leader_agent.state.vel,
-                'leader_ang_vel': self.leader_agent.state.ang_vel
+                'leader_ang_vel': self.leader_agent.state.ang_vel,
+                'last_action_u': self.last_action_u[current_agent_index],
+
             }   
         
         
@@ -5376,10 +5637,16 @@ class Scenario(BaseScenario):
         # optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2]
         # optimized_target_pose = torch.cat([optimized_target_pos, translated_agent_rot], dim=1)
         # print("optimized_target_pose:{}".format(optimized_target_pose.shape))
+        
+        
         if current_agent_index == 0:
+            opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=1)
+            opening_list = list(opening_tensor)
+            print("opening_list:{}".format(opening_list))
             return {
                 # "pos_rew": self.pos_rew if self.shared_rew else agent.pos_rew,
                 # "final_rew": self.final_rew,
+                "forward_opening": opening_list,
                 "eva_collision_num": self.eva_collision_num,
                 "eva_connection_num": self.eva_connection_num,   # 1 means connected, 0 means not connected
                 "env_observation": self.env_observation,
@@ -5396,6 +5663,7 @@ class Scenario(BaseScenario):
                 "agent_ang_vel": agent.state.ang_vel,
                 "group_center_rew": agent.group_center_rew,
                 "collision_obstacle_rew": agent.collision_obstacle_rew,
+                "agent_pos_rew": agent.pos_rew,
             }
         else:
             return {
@@ -5413,6 +5681,8 @@ class Scenario(BaseScenario):
                 "agent_target_collision": agent.target_collision_rew,
                 "agent_vel": agent.state.vel,
                 "agent_ang_vel": agent.state.ang_vel,
+                "agent_pos_rew": agent.pos_rew,
+
             }
     
 
@@ -5500,6 +5770,11 @@ class Scenario(BaseScenario):
         except Exception as e:
             # If there's an error in rendering the path, log it but don't crash
             print(f"Error rendering leader path: {e}")
+
+        left_opening_text = rendering.TextLine("left:{}".format(self.smoothed_left_opening.item()), x = 0.5, y=0.2)
+        right_opening_text = rendering.TextLine("right:{}".format(self.smoothed_right_opening.item()), x = 275.7, y=0.2)
+        geoms.append(left_opening_text)
+        geoms.append(right_opening_text)
 
         return geoms
 

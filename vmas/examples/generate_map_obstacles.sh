@@ -7,6 +7,9 @@ echo "Starting map generation..."
 
 # Example Command 1: Generate 20 training maps
 echo "Generating training maps (20)..."
+python3  map_generator.py --num 200 --output ../train_maps_0_obstacle --level 0 --type obstacle --path 0
+
+
 python3  map_generator.py --num 200 --output ../train_maps_1_obstacle --level 1 --type obstacle --path 0
 
 

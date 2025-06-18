@@ -648,17 +648,17 @@ def main():
     parser = argparse.ArgumentParser(description='生成高连通性隧道导航地图')
     parser.add_argument('--num', type=int, default=200, help='生成地图数量，默认5')
     parser.add_argument('--size', type=int, default=256, choices=[256, 512, 768, 1024, 2048], help='地图尺寸（像素），默认256')
-    parser.add_argument('--output', type=str, default='../train_tunnel_maps_0', help='输出目录路径，默认./tunnel_maps')
+    parser.add_argument('--output', type=str, default='../train_tunnel_maps_2', help='输出目录路径，默认./tunnel_maps')
     parser.add_argument('--version', action='version', version='tunnel-v1.0.0')
     parser.add_argument('--type', type=str, default='tunnel', choices=['obstacle_and_clutter', 'tunnel', 'obstacle', 'clutter'], help="Map type")
     parser.add_argument('--level', type=int, default=0, choices=[0, 1, 2, 3, 4, 5], help="Difficulty level")
     parser.add_argument('--path', type=int, default=0, help='0-no path generated, 1-generate paths')
 
     # Tunnel specific parameters
-    parser.add_argument('--tunnel_start_x_min', type=float, default=0.65, help="Min X start for tunnel (fraction of size), must be > 0.5")
-    parser.add_argument('--tunnel_start_x_max', type=float, default=0.7, help="Max X start for tunnel (fraction of size)")
-    parser.add_argument('--tunnel_height_min', type=float, default=0.15, help="Min tunnel height (fraction of size)")
-    parser.add_argument('--tunnel_height_max', type=float, default=0.3, help="Max tunnel height (fraction of size)")
+    parser.add_argument('--tunnel_start_x_min', type=float, default=0.57, help="Min X start for tunnel (fraction of size), must be > 0.5")
+    parser.add_argument('--tunnel_start_x_max', type=float, default=0.63, help="Max X start for tunnel (fraction of size)")
+    parser.add_argument('--tunnel_height_min', type=float, default=0.07, help="Min tunnel height (fraction of size)")
+    parser.add_argument('--tunnel_height_max', type=float, default=0.12, help="Max tunnel height (fraction of size)")
     
     args = parser.parse_args()
 

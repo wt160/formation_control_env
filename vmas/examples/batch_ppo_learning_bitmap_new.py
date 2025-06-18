@@ -11,10 +11,10 @@ experiment_configurations = [
     {
         "experiment_name": "ppo_bitmap_lr3e4_std0.2_rwg1_rwc-0.5",
         "train_env_type": "bitmap",
-        "policy_filename": "path/to/your/initial_bitmap_policy.pth", # Optional: if you have one
-        "output_policy_filename": "ppo_bitmap_final.pth",
+        "policy_filename": "ppo_policy.pth", # Optional: if you have one
+        "output_policy_filename": "ppo_bitmap_empty.pth",
         "steps_per_epoch": 500,
-        "epochs": 500, # Shorter for example
+        "epochs": 50000, # Shorter for example
         "device": "cpu", # Assign specific GPU if available
         "learning_rate": 3e-4,
         "action_std_init": 0.2,
@@ -23,7 +23,8 @@ experiment_configurations = [
         "num_envs": 20,
         "seed": 0,
         "has_laser": True,
-        "train_map_directory": "train_maps_0_clutter",
+        "train_map_directory": "train_maps_0_empty",
+        "use_leader_laser_only": True,
     },
     # {
     #     "experiment_name": "ppo_bitmap_lr1e-4_std0.4_rwg1.5_rwc-0.8_seed1",
@@ -78,7 +79,7 @@ for i, config in enumerate(experiment_configurations):
         # Otherwise, for consistency, convert other multi-word keys from underscore to hyphen for CLI.
 
         # --- ADJUST THIS LOGIC BASED ON YOUR ppo_train_bitmap_new.py DEFINITIONS --- 
-        if arg_name_key in ["train_map_directory", "train_env_type", "action_std_init", "reward_weight_goal", "reward_weight_collision", "policy_filename", "output_policy_filename", "experiment_name", "steps_per_epoch", "num_envs", "learning_rate", "has_laser"]: # Add other keys that are defined with underscores in ppo_train_bitmap_new.py
+        if arg_name_key in ["train_map_directory", "train_env_type", "action_std_init", "reward_weight_goal", "reward_weight_collision", "policy_filename", "output_policy_filename", "experiment_name", "steps_per_epoch", "num_envs", "learning_rate", "has_laser", "use_leader_laser_only"]: # Add other keys that are defined with underscores in ppo_train_bitmap_new.py
             param_name_cli = f"--{arg_name_key}" # Use underscore directly
         elif arg_name_key in []: # Add keys defined with hyphens in ppo_train_bitmap_new.py
              param_name_cli = f"--{arg_name_key.replace('_', '-')}" # Convert to hyphen

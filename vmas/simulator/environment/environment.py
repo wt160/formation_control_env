@@ -205,6 +205,10 @@ class Environment(TorchVectorizedObject):
         random.seed(seed)
         return [seed]
 
+    def set_action_mean(self, actions: Union[List, Dict]):
+        self.scenario.set_action_mean(actions)
+        
+
     def step(self, actions: Union[List, Dict]):
         """Performs a vectorized step on all sub environments using `actions`.
         Args:
@@ -733,10 +737,10 @@ class Environment(TorchVectorizedObject):
             )
             cam_range *= torch.max(viewer_size)
             self.viewer.set_bounds(
-                -cam_range[X],
-                cam_range[X],
-                -cam_range[Y],
-                cam_range[Y],
+                -cam_range[X] -1,
+                cam_range[X] + 1,
+                -cam_range[Y] - 1,
+                cam_range[Y] + 1,
             )
         else:
             # update bounds to center around agent

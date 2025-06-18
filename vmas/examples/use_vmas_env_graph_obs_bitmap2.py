@@ -33,7 +33,7 @@ def _get_deterministic_action(agent: Agent, continuous: bool, env):
     return action.clone()
 
 class VMASWrapper:
-    def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0):
+    def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0,train_map_directory= "train_maps_0_clutter"):
         self.env = make_env(
             scenario=scenario_name,
             num_envs=num_envs,
@@ -48,6 +48,7 @@ class VMASWrapper:
             is_imitation = is_imitation,
             working_mode=working_mode,
             evaluation_index = evaluation_index,
+            train_map_directory=train_map_directory,
         )
         self.max_connection_distance = 1.8
         self.device = device
@@ -227,13 +228,13 @@ def use_vmas_env(
     render: bool = False,
     save_render: bool = False,
     num_envs: int = 32,
-    n_steps: int = 1000,
+    n_steps: int = 500,
     random_action: bool = False,
     device: str = "cuda",
     scenario_name: str = "waterfall",
     n_agents: int = 5,
     continuous_actions: bool = True,
-    visualize_render: bool = True,
+    visualize_render: bool = False,
     collect_num = 30,
     is_imitation: bool = True,
     env_type: str = "narrow",
@@ -264,6 +265,11 @@ def use_vmas_env(
     # (by default they are lists of len # of agents)
     collected_data = []  # 
 
+    if env_type == "bitmap_tunnel":
+        train_map_directory = "train_tunnel_maps_2"
+    elif env_type == "bitmap":
+        train_map_directory = "train_maps_2_clutter"
+
     world_model_data = []
     for current_collect_num in range(collect_num):
 
@@ -277,6 +283,7 @@ def use_vmas_env(
             is_evaluation_mode=False,
             is_imitation=is_imitation,
             working_mode=working_mode,
+            train_map_directory = train_map_directory,
         )
         obs = env.get_obs()
 
@@ -288,10 +295,13 @@ def use_vmas_env(
         #     init_direction = env.env.compute_leader_init_direction(batched_paths[dim])
         #     env.env.reset_world_at_with_init_direction(dim, init_direction)
         last_obs = None
-        frame_list = []  # For creating a gif
+        frame_list_for_all_batch = []
+          # For creating a gif
         init_time = time.time()
         step = 0
-
+        for e in range(num_envs):
+            frame_list = []
+            frame_list_for_all_batch.append(frame_list)
 
         print("current_collect_num:{}".format(current_collect_num))
         with torch.no_grad():
@@ -317,8 +327,8 @@ def use_vmas_env(
                         actions.update({agent.name: action})
                     else:
                         actions.append(action)
-                print("actions:{}".format(actions))
-                print("actions[0] shape:{}".format(actions[0].shape))
+                # print("actions:{}".format(actions))
+                # print("actions[0] shape:{}".format(actions[0].shape))
                 obs, rews, dones, info = env.step(actions)
                 # print("obs:{}".format(obs))
                 # print("info:{}".format(info))
@@ -344,8 +354,8 @@ def use_vmas_env(
                 for agent_index, agent in enumerate(env.env.agents):
                     agent_name = agent.name
                     agent_info = info[agent_index]
-                    agent_pos = agent_info['optimized_target_pos'].cpu().detach().numpy()
-                    optimized_target_pos[agent_name] = agent_pos
+                    # agent_pos = agent_info['optimized_target_pos'].cpu().detach().numpy()
+                    # optimized_target_pos[agent_name] = agent_pos
                     agent_vel = agent_info['agent_vel']
                     agent_ang_vel = agent_info['agent_ang_vel']
                     # print("agent_ang_vel:{}".format(agent_ang_vel))
@@ -380,13 +390,15 @@ def use_vmas_env(
                 # print("obs:{}".format(obs))
                 # print("info:{}".format(info))
                 if render:
-                    frame = env.env.render(
-                        mode="rgb_array",
-                        agent_index_focus=None,  # Can give the camera an agent index to focus on
-                        visualize_when_rgb=visualize_render,
-                    )
-                    if save_render:
-                        frame_list.append(frame)
+                    for e in range(num_envs):
+                        frame = env.env.render(
+                            mode="rgb_array",
+                            env_index = e,
+                            agent_index_focus=None,  # Can give the camera an agent index to focus on
+                            visualize_when_rgb=visualize_render,
+                        )
+                        if save_render:
+                            frame_list_for_all_batch[e].append(frame)
 
         total_time = time.time() - init_time
         print(
@@ -402,7 +414,8 @@ def use_vmas_env(
             print("Collected data saved to 'collected_data.pkl'.")
 
     if render and save_render:
-        save_video(scenario_name, frame_list, fps=1 / env.env.scenario.world.dt)
+        for e in range(num_envs):
+            save_video("video/" + scenario_name + "_{}".format(e), frame_list_for_all_batch[e], fps=1 / env.env.scenario.world.dt)
 
 
 
@@ -481,17 +494,18 @@ if __name__ == "__main__":
     t1 = time.time()
     use_vmas_env(
         scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2",
-        render=False,
-        num_envs=20,
-        n_steps=700,
-        save_render=False,
+        render=True,
+        visualize_render=True,
+        num_envs=1,
+        n_steps=1000,
+        save_render=True,
         random_action=True,
         continuous_actions=True,
-        collect_num=200,
+        collect_num=1,
         is_imitation=True,
         device="cpu",
-        env_type="narrow",
-        working_mode="imitation",
+        env_type="bitmap",
+        working_mode="RL",
         filename="collected_data_complex_0.pkl",
         world_model_filename="world_model_data_narrow_8.pkl",
     )

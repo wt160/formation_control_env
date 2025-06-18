@@ -49,7 +49,7 @@ def set_seed(seed):
 # set_seed(seed)
 # Define your environment wrapper
 class VMASWrapper:
-    def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0, has_laser = True, train_map_directory = "train_maps_0_clutter"):
+    def __init__(self, scenario_name, num_envs, device, continuous_actions, n_agents, env_type=None, is_evaluation_mode=False, is_imitation=False, working_mode="imitation", evaluation_index=0, has_laser = True, train_map_directory = "train_maps_0_clutter",use_leader_laser_only = False):
         self.env = make_env(
             scenario=scenario_name,
             num_envs=num_envs,
@@ -72,6 +72,7 @@ class VMASWrapper:
         self.n_agents = n_agents
         self.num_envs = num_envs
         self.has_laser = has_laser
+        self.use_leader_laser_only = use_leader_laser_only
 
 
     def reset(self):
@@ -95,22 +96,37 @@ class VMASWrapper:
         leader_paths = self.env.get_leader_paths()
         return leader_paths
     
-    
+    def set_action_mean(self, actions):
+        self.env.set_action_mean(actions)
+        
+
     def get_graph_from_obs(self, obs, dones):
         batch_size = obs[0]['nominal_pos'].shape[0]
         n_agents = len(obs)
         
         # Pre-allocate tensors for each agent's observations
         laser_obs = []
+        forward_opening_obs = []
         relative_pos_obs = []
         nominal_pos_obs_diff = []
         leader_vel = []
         leader_ang_vel = []
         nominal_pos_obs = []
+        last_action_obs = []
         # Collect observations by type
         for agent_index in range(n_agents):
             if self.has_laser == True:
-                laser_obs.append(obs[agent_index]['laser'])
+                if self.use_leader_laser_only == True:
+                    print("use leader laser only")
+                    laser_obs.append(obs[0]['laser'])
+                    forward_opening_obs.append(obs[0]['forward_opening'])
+
+                else:
+                    laser_obs.append(obs[agent_index]['laser'])
+                    forward_opening_obs.append(obs[0]['forward_opening'])
+
+
+            last_action_obs.append(obs[agent_index]['last_action_u'])
             relative_pos_obs.append(obs[agent_index]['relative_pos'])
             nominal_pos_obs_diff.append(obs[agent_index]['nominal_pos_diff'])
             leader_vel.append(obs[agent_index]['leader_vel'])
@@ -119,18 +135,23 @@ class VMASWrapper:
         # Stack observations along agent dimension (dim=1)
         # laser_tensor shape: [batch_size, n_agents, laser_dim]
         if self.has_laser == True:
+            forward_opening_tensor = torch.stack(forward_opening_obs, dim=1)
             laser_tensor = torch.stack(laser_obs, dim=1)
         # print("laser tensor shape:{}".format(laser_tensor.shape))   #   [2, 5, 20]
         # print("laser:{}".format(laser_tensor))
         # relative_pos_tensor shape: [batch_size, n_agents, pos_dim]
         relative_pos_tensor = torch.stack(relative_pos_obs, dim=1)
+        last_action_tensor = torch.stack(last_action_obs, dim=1)
+
         # print("relative pos tensor shape:{}".format(relative_pos_tensor.shape))    #[2, 5, 3]
         # print("relative pos:{}".format(relative_pos_tensor))
         nominal_pos_diff_tensor = torch.stack(nominal_pos_obs_diff, dim=1)
         nominal_pos_tensor = torch.stack(nominal_pos_obs, dim=1)
         leader_vel_tensor = torch.stack(leader_vel, dim=1)
         leader_ang_vel_tensor = torch.stack(leader_ang_vel, dim=1)
-        # print("nominal pos tensor shape:{}".format(nominal_pos_tensor.shape))    #[2, 5, 3]
+        print("nominal pos tensor shape:{}".format(nominal_pos_tensor.shape))    #[2, 5, 3]
+        print("last action u tensor shape:{}".format(last_action_tensor.shape))    #[2, 5, 3]
+
         # print("nominal pos:{}".format(nominal_pos_tensor))
         # print("laser tensor shape:{}".format(laser_tensor.shape))   #   [2, 5, 20]
         # print("relative pos tensor shape:{}".format(relative_pos_tensor.shape))    #[2, 5, 3]
@@ -138,14 +159,24 @@ class VMASWrapper:
         # Get feature dimensions
         if self.has_laser == True:
             laser_dim = laser_tensor.shape[-1]
+            forward_opening_dim = forward_opening_tensor.shape[0]
         pos_dim = relative_pos_tensor.shape[-1]
         nominal_dim = nominal_pos_diff_tensor.shape[-1]
         leader_vel_dim = leader_vel_tensor.shape[-1]
         leader_ang_vel_dim = leader_ang_vel_tensor.shape[-1]
+        last_action_dim = last_action_tensor.shape[-1]
+
         # Reshape tensors to combine batch and agent dimensions for concatenation
         # [batch_size, n_agents, feature_dim] -> [batch_size * n_agents, feature_dim]
+        # print("forward_opening tensor hsape:{}".format(forward_opening_tensor.shape))
+
         if self.has_laser == True:
             laser_flat = laser_tensor.reshape(-1, laser_dim)
+            reshaped_tensor = forward_opening_tensor.reshape(2, -1) # -1 infers the dimension size, which will be 5*20=100
+            forward_opening_flat = reshaped_tensor.transpose(0, 1)
+        print("last_action_dim:{}".format(last_action_dim))
+
+        last_action_flat = last_action_tensor.reshape(-1, last_action_dim)
         relative_pos_flat = relative_pos_tensor.reshape(-1, pos_dim)
         nominal_pos_flat = nominal_pos_tensor.reshape(-1, nominal_dim)
         leader_vel_flat = leader_vel_tensor.reshape(-1, leader_vel_dim)
@@ -155,20 +186,28 @@ class VMASWrapper:
         # combined = torch.cat([laser_flat, relative_pos_flat, leader_vel_flat, leader_ang_vel_flat, nominal_pos_flat], dim=1)
         
         # combined = torch.cat([relative_pos_flat, leader_vel_flat, leader_ang_vel_flat, nominal_pos_flat], dim=1)
-        
-        
+        print("last_action_flat shape:{}".format(last_action_flat.shape))
+        print("nominal_pos flat shape:{}".format(nominal_pos_flat.shape))
+
+        # print("forward_opening hsape:{}".format(forward_opening_flat.shape))
+        # print("relative_pos_flat shape:{}".format(relative_pos_flat.shape))
         if self.has_laser == True:
-            combined = torch.cat([laser_flat, relative_pos_flat, nominal_pos_flat], dim=1)
+            combined = torch.cat([laser_flat, relative_pos_flat, nominal_pos_flat, last_action_flat], dim=1)
+            # combined = torch.cat([laser_flat, forward_opening_flat, relative_pos_flat, nominal_pos_flat], dim=1)
+
         else:
         # combined = torch.cat([relative_pos_flat, leader_vel_flat, leader_ang_vel_flat, nominal_pos_flat], dim=1)
-            combined = torch.cat([relative_pos_flat, nominal_pos_flat], dim=1)
+            combined = torch.cat([relative_pos_flat, nominal_pos_flat, last_action_flat], dim=1)
 
 
         # Reshape back to [batch_size, n_agents, combined_dim]
         # combined_dim = laser_dim + pos_dim + nominal_dim + leader_vel_dim + leader_ang_vel_dim
         # combined_dim =   pos_dim + nominal_dim + leader_vel_dim + leader_ang_vel_dim
         if self.has_laser == True:
-            combined_dim = pos_dim + nominal_dim + laser_dim
+            # combined_dim = pos_dim + nominal_dim + laser_dim
+            # combined_dim = laser_dim + forward_opening_dim + pos_dim + nominal_dim
+            combined_dim = laser_dim + pos_dim + nominal_dim + last_action_dim
+
         else:
             combined_dim =   pos_dim + nominal_dim
         combined_x = combined.reshape(batch_size, n_agents, combined_dim)
@@ -190,7 +229,7 @@ class VMASWrapper:
             edge_index = []
             edge_attr = []
             batch_nominal_pos_tensor = nominal_pos_tensor[d, :]
-            print("batch_nominal_pos sape:{}".format(batch_nominal_pos_tensor.shape))
+            # print("batch_nominal_pos sape:{}".format(batch_nominal_pos_tensor.shape))
             # print("x:{}".format(x))
             # input("1")
             # Create a tensor for the nominal formation
@@ -220,7 +259,7 @@ class VMASWrapper:
             # print("x:{}".format(x))
             # input("1")
             # Create the PyTorch Geometric data object
-            print("edge_index:{}".format(edge_index))
+            # print("edge_index:{}".format(edge_index))
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
             graph_list.append(data)
         # graph_list = Batch.from_data_list(graph_list)
@@ -248,16 +287,16 @@ class VMASWrapper:
         # obs = obs[0]
         rewards = torch.stack(rewards, dim=1).to(self.device)  # [num_envs, n_agents]
         # dones = torch.stack(dones, dim=1).to(self.device)  # [num_envs, n_agents]
-        print("rewards:{}".format(rewards))
+        # print("rewards:{}".format(rewards))
         # Sum rewards across agents
         summed_rewards = rewards.sum(dim=1)  # [num_envs]
-        print("summed reward:{}".format(summed_rewards))
+        # print("summed reward:{}".format(summed_rewards))
         # If done_override is provided, set done flags accordingly
         # print("done override shape:{}".format(done_override.shape))
         if done_override is not None:
             dones = dones | done_override  # Broadcast to [num_envs, n_agents]
         # print("dones shape:{}".format(dones.shape))
-        print("dones:{}".format(dones))
+        # print("dones:{}".format(dones))
 
         return obs, summed_rewards, dones, infos
 
@@ -278,34 +317,7 @@ class GATActor(nn.Module):
         self.num_agents = num_agents
 
 
-        self.lidar_cnn_hidden_channels_c1 = 16 # Hidden channels for first CNN layer (e.g., 16)
-        self.lidar_cnn_hidden_channels_c2 = 32 # Hidden channels for second CNN layer (e.g., 32)
-        self.lidar_embedding_dim = 14
-        self.lidar_dim = 20
-        self.lidar_encoder_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=self.lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2), # Halves sequence length if lidar_dim is even
-            nn.Conv1d(in_channels=self.lidar_cnn_hidden_channels_c1, out_channels=self.lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1), # Reduces sequence length to 1: Output [N, lidar_cnn_hidden_channels_c2, 1]
-            nn.Flatten(),            # Output: [N_total_nodes, lidar_cnn_hidden_channels_c2]
-            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim),
-            nn.ReLU()
-        )
-        # Output of lidar_encoder_cnn: [N_total_nodes, lidar_embedding_dim]
-
-        # 2. LiDAR Decoder (MLP to reconstruct raw LiDAR from embedding)
-        self.lidar_decoder_mlp = nn.Sequential(
-            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
-            nn.ReLU(),
-            nn.Linear(hidden_channels, self.lidar_dim) # Output raw lidar_dim
-            # No final activation if raw LiDAR values are not bounded like [0,1].
-            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
-        )
-
-
-        gnn_input_channels = in_channels - self.lidar_dim + self.lidar_embedding_dim
+        gnn_input_channels = in_channels 
         # GAT layers
         self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
@@ -333,18 +345,11 @@ class GATActor(nn.Module):
         # print("x_all_features shape:{}".format(x_all_features.shape))
         # nominal_pos_diff = x[:, 3:]
 
-        original_node_features = x_all_features[:, :-self.lidar_dim] # All columns except the last lidar_dim ones
-        raw_lidar_scans_all_nodes = x_all_features[:, -self.lidar_dim:]  # The last lidar_dim columns
         
-        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
         
-        # 2. Decode LiDAR for reconstruction loss (using the same processed features)
-        reconstructed_lidar_all_nodes = self.lidar_decoder_mlp(processed_lidar_features)
 
-        # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
-        x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
         
-        x = self.conv1(x_for_gnn, edge_index, edge_attr.squeeze(dim=1))
+        x = self.conv1(x_all_features, edge_index, edge_attr.squeeze(dim=1))
         x = torch.relu(x)
         x = self.conv2(x, edge_index, edge_attr)
         x = torch.relu(x)
@@ -364,6 +369,156 @@ class GATActor(nn.Module):
         # print("graph embedding shape:{}".format(graph_embedding_repeated.shape))
         # Concatenate agent embeddings with graph embeddings
         combined = torch.cat([agent_embeddings, graph_embedding_repeated], dim=1)
+        # print("combined shape:{}".format(combined.shape))
+        # Actor head
+        actor_hidden = self.fc1(combined)
+
+        mean_and_std_params = self.fc2(actor_hidden)
+        
+        # Split into raw mean and raw std parameters
+        # Each will have shape: [batch_size * num_agents, action_dim]
+        action_mean_raw, action_std_raw_params = torch.chunk(mean_and_std_params, 2, dim=-1)
+        
+        # Process action_mean_raw: apply tanh and scale by limits
+        action_mean_tanh = torch.tanh(action_mean_raw)
+        action_mean_scaled = action_mean_tanh * self.action_limits # self.action_limits is broadcasted
+        
+        min_std_val = 0.01
+        max_std_val = 0.45
+        std_output_scaled = torch.sigmoid(action_std_raw_params) # scales to (0, 1)
+        action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val)
+        action_std_processed = action_std_processed + 1e-5 # Epsilon for stability
+        # Process action_std_raw_params: apply softplus to ensure positivity
+        # action_std_processed = F.softplus(action_std_raw_params)
+        # Optional: Add a small epsilon for numerical stability if std can become too close to zero
+        # action_std_processed = F.softplus(action_std_raw_params) + 1e-6 
+        # --- END MODIFICATION ---
+
+        # Reshape to (num_graphs, num_agents, action_dim)
+        action_mean = action_mean_scaled.view(data.num_graphs, self.num_agents, -1)
+        action_std = action_std_processed.view(data.num_graphs, self.num_agents, -1)
+
+        return action_mean, action_std
+
+    def extract_agent_embeddings(self, x, batch, batch_size):
+        agent_node_indices = []
+        for graph_idx in range(batch_size):
+            node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+            agent_nodes = node_indices[:self.num_agents]
+            agent_node_indices.append(agent_nodes)
+
+        agent_node_indices = torch.cat(agent_node_indices, dim=0)
+        agent_embeddings = x[agent_node_indices]
+        return agent_embeddings
+
+class GATActorWithLaser(nn.Module):
+    def __init__(self, in_channels, hidden_channels, action_dim, num_agents, x_limit, y_limit, theta_limit):
+        super(GATActorWithLaser, self).__init__()
+        self.num_agents = num_agents
+
+
+        self.lidar_cnn_hidden_channels_c1 = 16 # Hidden channels for first CNN layer (e.g., 16)
+        self.lidar_cnn_hidden_channels_c2 = 32 # Hidden channels for second CNN layer (e.g., 32)
+        self.lidar_embedding_dim = 5
+        self.lidar_dim = 20
+        self.forward_opening_dim = 2
+        self.lidar_encoder_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=self.lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2), # Halves sequence length if lidar_dim is even
+            nn.Conv1d(in_channels=self.lidar_cnn_hidden_channels_c1, out_channels=self.lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1), # Reduces sequence length to 1: Output [N, lidar_cnn_hidden_channels_c2, 1]
+            nn.Flatten(),            # Output: [N_total_nodes, lidar_cnn_hidden_channels_c2]
+            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim),
+            nn.ReLU()
+        )
+        # Output of lidar_encoder_cnn: [N_total_nodes, lidar_embedding_dim]
+
+        # 2. LiDAR Decoder (MLP to reconstruct raw LiDAR from embedding)
+        self.lidar_decoder_mlp = nn.Sequential(
+            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
+            nn.ReLU(),
+            nn.Linear(hidden_channels, self.lidar_dim) # Output raw lidar_dim
+            # No final activation if raw LiDAR values are not bounded like [0,1].
+            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
+        )
+
+        self.forward_opening_mlp = nn.Sequential(
+            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
+            nn.ReLU(),
+            nn.Linear(hidden_channels, self.forward_opening_dim) # Output raw lidar_dim
+            # No final activation if raw LiDAR values are not bounded like [0,1].
+            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
+        )
+
+        gnn_input_channels = in_channels 
+        # GAT layers
+        self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+
+        
+
+
+
+        limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
+        self.action_limits = limits_tensor.view(1, action_dim)
+        # self.register_buffer('action_limits', limits_tensor.view(1, self.action_dim))
+        # Global pooling layer
+        self.pool = global_mean_pool
+
+        # Actor network (policy head)
+        self.fc1 = nn.Sequential(
+            nn.Linear(hidden_channels * 16 + self.lidar_embedding_dim + 3, hidden_channels * 4),
+            nn.ReLU()
+        )
+        self.fc2 = nn.Linear(hidden_channels * 4, action_dim * 2)
+        # self.log_std = nn.Parameter(torch.zeros(1, 1, action_dim))
+    def forward(self, data):
+        x_all_features, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        # print("x_all_features shape:{}".format(x_all_features.shape))
+        # nominal_pos_diff = x[:, 3:]
+
+        original_node_features = x_all_features[:, self.lidar_dim: self.lidar_dim + 6 ] # All columns except the last lidar_dim ones
+        
+        raw_lidar_scans_all_nodes = x_all_features[:, :self.lidar_dim]  # The first lidar_dim columns
+        last_action_features = x_all_features[:, self.lidar_dim + 6:]
+
+        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
+        # print("processed_lidar_features:{}".format(processed_lidar_features))
+        # 2. Decode LiDAR for reconstruction loss (using the same processed features)
+        reconstructed_lidar_all_nodes = self.lidar_decoder_mlp(processed_lidar_features)
+
+        # forward_opening = self.forward_opening_mlp(processed_lidar_features)
+        # unique_rows_tensor = forward_opening[::5]
+        # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
+        # x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
+        
+        x = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1))
+        x = torch.relu(x)
+        x = self.conv2(x, edge_index, edge_attr)
+        x = torch.relu(x)
+        x = self.conv3(x, edge_index, edge_attr)
+        x = torch.relu(x)
+
+        # Global graph embedding
+        graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels * 8]
+
+        # Extract agent node embeddings
+        agent_embeddings = self.extract_agent_embeddings(x, data.batch, data.num_graphs)
+
+
+        agent_lidar_embeddings = self.extract_agent_embeddings(processed_lidar_features, data.batch, data.num_graphs)
+
+        last_action_embeddings = self.extract_agent_embeddings(last_action_features, data.batch, data.num_graphs)
+        # Repeat graph embedding for each agent
+        graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)
+        # print("agent_embedding shape:{}".format(agent_embeddings.shape))
+        # print("nominal_pos_diff shape:{}".format(nominal_pos_diff.shape))
+        # print("graph embedding shape:{}".format(graph_embedding_repeated.shape))
+        # Concatenate agent embeddings with graph embeddings
+        combined = torch.cat([agent_embeddings, graph_embedding_repeated, agent_lidar_embeddings, last_action_embeddings], dim=1)
         # print("combined shape:{}".format(combined.shape))
         # Actor head
         actor_hidden = self.fc1(combined)
@@ -406,12 +561,11 @@ class GATActor(nn.Module):
         agent_embeddings = x[agent_node_indices]
         return agent_embeddings
 
-
 class GATCritic(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_agents):
         super(GATCritic, self).__init__()
         self.num_agents = num_agents
-
+        self.lidar_dim = 20
         # GAT layers
         self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
@@ -425,9 +579,16 @@ class GATCritic(nn.Module):
         self.critic_fc2 = nn.Linear(hidden_channels * 4, 1)  # Outputs a scalar value for each agent
 
     def forward(self, data):
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        x_all_features, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        # print("x_all_features shape:{}".format(x_all_features.shape))
+        # nominal_pos_diff = x[:, 3:]
 
-        x = self.conv1(x, edge_index, edge_attr.squeeze(dim=1))
+        original_node_features = x_all_features[:, self.lidar_dim: self.lidar_dim + 6]
+
+        # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
+        # x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
+        
+        x = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1))
         x = torch.relu(x)
         x = self.conv2(x, edge_index, edge_attr)
         x = torch.relu(x)
@@ -435,7 +596,7 @@ class GATCritic(nn.Module):
         x = torch.relu(x)
 
         # Global graph embedding
-        graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels * 8]
+        graph_embedding = self.pool(x, data.batch)  
 
         # Critic head
         critic_hidden = torch.relu(self.critic_fc1(graph_embedding))
@@ -491,7 +652,7 @@ def main(args):
     train_map_directory = args.train_map_directory
     device = torch.device("cpu")
     from datetime import datetime
-    output_policy_filename = "ppo_policy.pth"
+    output_policy_filename = args.output_policy_filename
     # TensorBoard writer
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = os.path.join("runs", experiment_name, current_time)
@@ -499,17 +660,18 @@ def main(args):
     writer = SummaryWriter(log_dir=log_dir)
     swanlab.init(
         # 设置项目名
-        project=experiment_name,
-        
+        project="multi_robot_navigation",
+        experiment_name=experiment_name,
         # 设置超参数
         config={
             "train_env_type": args.train_env_type,
             "has_laser": args.has_laser,
             "env_nums": args.num_envs,
+            "use_leader_laser_only": args.use_leader_laser_only,
         }
     )
 
-
+    
 
     # Model output directory
     model_save_dir = os.path.join("models", experiment_name)
@@ -517,10 +679,13 @@ def main(args):
     output_policy_path = os.path.join(model_save_dir, output_policy_filename)    
     train_env_type = args.train_env_type 
     steps_per_epoch = args.steps_per_epoch
+
+
+    curriculum_transition_return = []
     # Initialize the model
     num_agents = 5
     if args.has_laser:
-        in_channels = 26  # Adjust based on your observation space
+        in_channels = 6  # Adjust based on your observation space
     else:
         in_channels = 6  # Adjust based on your observation space
 
@@ -541,32 +706,23 @@ def main(args):
     expert_gate_net = ExpertGateNet(in_channels=in_channels, hidden_channels=hidden_dim, num_experts=num_experts).to(device)
 
     # Initialize the models
-    clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
+    if args.has_laser:
+        clutter_actor_model = GATActorWithLaser(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
+
+        # clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
+    
+    else:
+        clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
+
     critic_model = GATCritic(in_channels, hidden_dim, num_agents).to(device)
 
-    # free_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents).to(device)
-    # Load the pre-trained actor network weights
-    # pretrained_weights = torch.load('best_gnn_model.pth', map_location=device)
-    # actor_model.load_state_dict(pretrained_weights)
-    # expert_choose_net_weights = torch.load('best_expert_gate_net_free_clutter.pth')
-    # pretrained_weights = torch.load('best_imitation_model_clutter.pth', map_location=device)
-    # clutter_pretrained_weights = torch.load(policy_filename, map_location=device)
-    # free_pretrained_weights = torch.load('best_imitation_model_empty_noise_1.pth', map_location=device)
-
-
-    # pretrained_weights = torch.load('best_ppo_model.pth', map_location=device)
-
-    # Filter out keys not present in the actor_model
-    # free_pretrained_weights = {k: v for k, v in free_pretrained_weights.items() if k in free_actor_model.state_dict()}
+    # clutter_pretrained_weights = torch.load(args.policy_filename, map_location=device)
 
     # clutter_pretrained_weights = {k: v for k, v in clutter_pretrained_weights.items() if k in clutter_actor_model.state_dict()}
-    # actor_model.load_state_dict(pretrained_weights)
-    # pretrained_weights = torch.load('best_gnn_model.pth', map_location=device)
-    # free_actor_model.load_state_dict(free_pretrained_weights, strict=False)
+    # clutter_actor_model.load_state_dict(clutter_pretrained_weights)
 
-    # clutter_actor_model.load_state_dict(clutter_pretrained_weights, strict=False)
-    # expert_gate_net.load_state_dict(expert_choose_net_weights, strict=False)
-    # Initialize the critic network
+
+
     clutter_actor_model.apply(initialize_weights)
     critic_model.apply(initialize_weights)
     # model = GATActorCritic(in_channels, hidden_dim, action_dim, num_agents).to(device)
@@ -585,7 +741,6 @@ def main(args):
     actor_optimizer = optim.Adam(clutter_actor_model.parameters(), lr=3e-4)
     critic_optimizer = optim.Adam(critic_model.parameters(), lr=3e-4)
 
-    has_laser = False
     # PPO Hyperparameters
     num_epochs = 3000
     num_agents = 5
@@ -646,9 +801,8 @@ def main(args):
         epoch_rewards_list = []
         epoch_dones_list = []
         epoch_obs_data_list = [] # This will be a flat list of Data objects
-
+        epoch_forward_opening_list = []
         epoch_run_rewards_log = [] # For logging mean re
-
 
 
 
@@ -666,6 +820,10 @@ def main(args):
         epoch_agent_connection_rewards = []
         epoch_agent_action_diff_rewards = []
         epoch_agent_target_collision_rewards = []
+        epoch_agent_pos_rewards = []
+
+
+
         # obs = env.reset()  # [num_envs, n_agents, obs_dim]
         for epoch_restart_idx in range(epoch_restart_num):
             env = VMASWrapper(
@@ -677,8 +835,9 @@ def main(args):
                 env_type=train_env_type,
                 is_imitation=False,
                 working_mode="RL",
-                has_laser = has_laser,
+                has_laser = args.has_laser,
                 train_map_directory = train_map_directory,
+                use_leader_laser_only = args.use_leader_laser_only, 
 
             )
             obs_list_of_data = env.get_obs()
@@ -712,15 +871,21 @@ def main(args):
                     # print()
                     # print("batch_obs device:{}".format(batch_obs))
                     # batch_obs = batch_obs.to(device)
-                    action_mean, action_std = clutter_actor_model(batched_obs_for_gnn)  # Now returns action_std
-                    print("action_mean:{}".format(action_mean))
-                    print("action std:{}".format(action_std))
+                    if args.has_laser == True:
+                        # action_mean, action_std = clutter_actor_model(batched_obs_for_gnn) 
+
+                        action_mean, action_std ,_, _ = clutter_actor_model(batched_obs_for_gnn)  # Now returns action_std
+                    else:
+                        action_mean, action_std = clutter_actor_model(batched_obs_for_gnn) 
+                    # print("action_mean:{}".format(action_mean))
+                    # print("action std:{}".format(action_std))
                     # input("1")
                     dist = torch.distributions.Normal(action_mean, action_std)
                     
+                    env.set_action_mean(action_mean)
                     action_sampled_per_env = dist.sample() # [train_num_envs, num_agents, action_dim]
                     log_prob_per_env = dist.log_prob(action_sampled_per_env).sum(dim=-1) # [train_num_envs, num_agents]
-                    print("action_sample:{}".format(action_sampled_per_env))
+                    # print("action_sample:{}".format(action_sampled_per_env))
                     # print("batch_obs:{}".format(batch_obs))
                     # action_mean, state_value = model(batch_obs)
                     # action_mean = actor_model(batch_obs)
@@ -769,6 +934,10 @@ def main(args):
 
                 obs_list_of_data = next_obs_list_of_data # For next iteration
 
+
+
+                epoch_forward_opening_list.extend(infos[0]["forward_opening"])
+                
                 if (step_idx + 1) % 100 == 0:
                     print(f"Epoch {epoch+1}/{num_epochs}, Restart {epoch_restart_idx+1}/{epoch_restart_num}, Step {step_idx+1}/{steps_per_epoch}")
                 # next_obs, rewards, dones, infos = env.step(action_env)
@@ -783,12 +952,14 @@ def main(args):
                 for agent_index, agent in enumerate(env.env.agents):
                     agent_name = agent.name
                     agent_info = infos[agent_index]
+                    epoch_agent_pos_rewards.append(agent_info["agent_pos_rew"].mean().cpu().item())
                     epoch_group_center_rewards.append(agent_info["group_center_rew"].mean().cpu().item()) 
                     epoch_agent_collision_obstacle_rewards.append(agent_info["collision_obstacle_rew"].mean().cpu().item()) 
                     epoch_agent_collision_rewards.append(agent_info["agent_collisions"].mean().cpu().item())
                     epoch_agent_connection_rewards.append(agent_info["agent_connection_rew"].mean().cpu().item())
                     epoch_agent_action_diff_rewards.append(agent_info["agent_diff_rew"].mean().cpu().item())
                     epoch_agent_target_collision_rewards.append(agent_info["agent_target_collision"].mean().cpu().item())
+
 
 
             epoch_actions_list.append(torch.stack(restart_actions, dim=0)) # Stacks along new dim 0 (steps)
@@ -839,7 +1010,9 @@ def main(args):
         avg_group_center_rew = np.mean(epoch_group_center_rewards)
         avg_agent_collision_obstacle_rew = np.mean(epoch_agent_collision_obstacle_rewards)
         avg_agent_connection_rew = np.mean(epoch_agent_connection_rewards)
-        # avg_agent_action_diff_rew = np.mean(epoch_agent_action_diff_rewards)
+        avg_agent_action_diff_rew = np.mean(epoch_agent_action_diff_rewards)
+        avg_agent_pos_rew = np.mean(epoch_agent_pos_rewards)
+
         # avg_target_collision_rew = np.mean(epoch_agent_target_collision_rewards)
 
         # ep_rewards.append(avg_reward)
@@ -847,7 +1020,9 @@ def main(args):
         swanlab.log({'Reward/avg_group_center_rew': avg_group_center_rew, 
                      'Reward/agent_collision_rew': avg_agent_collision_rew,
                      'Reward/agent_collision_obstacle_rew': avg_agent_collision_obstacle_rew,
-                     'Reward/agent_connection_rew': avg_agent_connection_rew}, step=epoch)
+                     'Reward/agent_connection_rew': avg_agent_connection_rew,
+                     'Reward/agent_action_diff_rew':avg_agent_action_diff_rew,
+                     'Reward/agent_pos_rew':avg_agent_pos_rew}, step=epoch)
         
         writer.add_scalar('Reward/avg_group_center_rew', avg_group_center_rew, epoch)
         writer.add_scalar('Reward/agent_collision_rew',avg_agent_collision_rew, epoch )
@@ -928,7 +1103,10 @@ def main(args):
                 
                 mb_indices = permutation_indices[start_idx:end_idx]
 
+
+                print("epoch_forward_opening length:{}".format(len(epoch_forward_opening_list)))
                 # Create minibatch of Data objects
+                forward_opening_list_mb = [epoch_forward_opening_list[i] for i in mb_indices.cpu().tolist()] 
                 obs_data_list_mb = [epoch_obs_data_list[i] for i in mb_indices.cpu().tolist()] # Get Data objs
                 obs_batched_mb_gnn = Batch.from_data_list(obs_data_list_mb).to(device)
                 # num_graphs in obs_batched_mb_gnn is len(mb_indices)
@@ -939,7 +1117,16 @@ def main(args):
                 advantages_mb = advantages_flat_norm[mb_indices]# [mb_len]
 
                 # Actor forward pass
-                new_action_mean_mb, new_action_std_mb = clutter_actor_model(obs_batched_mb_gnn)
+
+
+                if args.has_laser == True:
+                    new_action_mean_mb, new_action_std_mb, agent_raw_lidar_targets_mb, agent_reconstructed_lidar_mb = clutter_actor_model(obs_batched_mb_gnn)
+                    # new_action_mean_mb, new_action_std_mb  = clutter_actor_model(obs_batched_mb_gnn)
+
+                else:
+                    new_action_mean_mb, new_action_std_mb  = clutter_actor_model(obs_batched_mb_gnn)
+
+
                 # Shapes: [mb_len, num_agents, action_dim]
                 new_dist_mb = torch.distributions.Normal(new_action_mean_mb, new_action_std_mb)
                 new_log_probs_mb = new_dist_mb.log_prob(actions_mb).sum(dim=-1) # [mb_len, num_agents]
@@ -960,9 +1147,24 @@ def main(args):
                 
                 entropy_bonus = entropy_mb.mean() # Average entropy over minibatch and agents
 
+
+
+                forward_opening_tensor = torch.stack(forward_opening_list_mb, dim=0)
+
                 # Actor update
+                reconstruction_loss_coef = 0.01 
+
                 actor_optimizer.zero_grad()
-                actor_total_loss = actor_loss - entropy_coef * entropy_bonus
+
+                if args.has_laser == True:
+                    # forward_opening_loss = F.mse_loss(forward_opening_tensor, forward_opening_output_mb)
+                    lidar_reconstruction_loss = F.mse_loss(agent_reconstructed_lidar_mb, agent_raw_lidar_targets_mb)
+                    actor_total_loss = actor_loss - entropy_coef * entropy_bonus + reconstruction_loss_coef * lidar_reconstruction_loss #+ 0.1 * forward_opening_loss
+                    # actor_total_loss = actor_loss - entropy_coef * entropy_bonus 
+
+                else:
+                    actor_total_loss = actor_loss - entropy_coef * entropy_bonus 
+
                 actor_total_loss.backward()
                 nn.utils.clip_grad_norm_(clutter_actor_model.parameters(), max_grad_norm)
                 actor_optimizer.step()
@@ -992,7 +1194,12 @@ def main(args):
         if len(epoch_obs_data_list) > 0:
             sample_obs_for_std_log = Batch.from_data_list(epoch_obs_data_list[:min(8, len(epoch_obs_data_list))]).to(device)
             with torch.no_grad():
-                _, act_std_sample = clutter_actor_model(sample_obs_for_std_log)
+                if args.has_laser == True:
+                    _, act_std_sample, _, _ = clutter_actor_model(sample_obs_for_std_log)
+                    # _, act_std_sample= clutter_actor_model(sample_obs_for_std_log)
+
+                else:
+                    _, act_std_sample = clutter_actor_model(sample_obs_for_std_log)
                 writer.add_scalar('Policy/MeanActionStd', act_std_sample.mean().item(), epoch)
                 swanlab.log({'Policy/MeanActionStd': act_std_sample.mean().item()}, step=epoch)
 
@@ -1011,7 +1218,7 @@ def main(args):
 
             # For simplicity, collision/connection metrics are not re-implemented here
             # but would follow a similar pattern to the training loop's info handling if needed.
-
+            print("eval :train_map_directory:{}".format(train_map_directory))
             for eval_idx in range(eval_epoch_restart_num):
                 eval_env = VMASWrapper(
                     scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2", # Or a specific eval scenario
@@ -1023,8 +1230,9 @@ def main(args):
                     is_evaluation_mode=True,
                     working_mode="RL",
                     evaluation_index=1000 + eval_idx, # Use different eval indices
-                    has_laser = has_laser,
+                    has_laser = args.has_laser,
                     train_map_directory = train_map_directory,
+                    use_leader_laser_only = args.use_leader_laser_only, 
                 )
                 eval_obs_list = eval_env.get_obs() # List of Data objects (len=eval_num_envs)
                 
@@ -1035,7 +1243,13 @@ def main(args):
                     with torch.no_grad():
                         eval_batched_obs = Batch.from_data_list(eval_obs_list).to(device)
                         # Use deterministic actions (mean) for evaluation
-                        eval_action_mean, _ = clutter_actor_model(eval_batched_obs)
+
+                        if args.has_laser == True:
+                            eval_action_mean, _, _, _ = clutter_actor_model(eval_batched_obs)
+                            # eval_action_mean, _= clutter_actor_model(eval_batched_obs)
+
+                        else:
+                            eval_action_mean, _= clutter_actor_model(eval_batched_obs)
                         # eval_action_mean shape: [eval_num_envs, num_agents, action_dim]
                     
                     eval_action_for_env = [eval_action_mean[:, i, :] for i in range(num_agents)]
@@ -1061,16 +1275,63 @@ def main(args):
 
             avg_eval_reward = np.mean(eval_rewards_all_episodes) if eval_rewards_all_episodes else 0
             swanlab.log({'Evaluation/AverageReward': avg_eval_reward}, step=epoch)
-            
+            curriculum_transition_return.append(avg_eval_reward)
             writer.add_scalar('Evaluation/AverageReward', avg_eval_reward, epoch)
             print(f'Epoch {epoch + 1} Evaluation: Avg Reward: {avg_eval_reward:.3f}')
 
+            train_map_level = 0
+            if train_map_directory == "train_maps_0_clutter":
+                train_map_level = 0
+            if train_map_directory == "train_maps_1_clutter":
+                train_map_level = 1
+            if train_map_directory == "train_maps_2_clutter":
+                train_map_level = 2
+            if train_map_directory == "train_maps_3_clutter":
+                train_map_level = 3
+            if train_map_directory == "train_maps_4_clutter":
+                train_map_level = 4
+            if train_map_directory == "train_maps_5_clutter":
+                train_map_level = 5
+            swanlab.log({'Evaluation/train_map_level': train_map_level}, step=epoch)
+            
+
+            if len(curriculum_transition_return) == 5:
+                print("curriculum_transition_return:{}".format(curriculum_transition_return))
+                curriculum_transition_return_mean = np.mean(curriculum_transition_return)
+                print("curriculum transition return mean:{}".format(curriculum_transition_return_mean))
+                curriculum_transition_return = []
+            else:
+                curriculum_transition_return_mean = 0.0
             if avg_eval_reward > best_evaluation_reward:
                 best_evaluation_reward = avg_eval_reward
                 torch.save(clutter_actor_model.state_dict(), output_policy_filename)
                 print(f'New best evaluation model saved with avg_reward: {best_evaluation_reward:.4f}')
                 if eval_idx == 0 and current_episode_frames : # Save best video again if it's also the first
                     save_video(f"{log_dir}/BEST_eval_E{epoch+1}", current_episode_frames, fps=15)
+
+
+
+            if train_env_type == "bitmap_tunnel":
+                if curriculum_transition_return_mean > -200000.0 and train_map_directory == "train_tunnel_maps_0":
+                    train_map_directory = "train_tunnel_maps_1"
+                elif curriculum_transition_return_mean > 20000.0 and train_map_directory == "train_tunnel_maps_1":
+                    train_map_directory = "train_tunnel_maps_2"
+            elif train_env_type == "bitmap":
+                print("change map :{}".format(curriculum_transition_return_mean))
+                if curriculum_transition_return_mean > 13000.0 and train_map_directory == "train_maps_0_clutter":
+                    train_map_directory = "train_maps_1_clutter"
+                    print("change map to train_maos_1_clutter")
+                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_1_clutter":
+                    train_map_directory = "train_maps_2_clutter"
+                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_2_clutter":
+                    train_map_directory = "train_maps_3_clutter"
+                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_3_clutter":
+                    train_map_directory = "train_maps_4_clutter"   
+                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_4_clutter":
+                    train_map_directory = "train_maps_5_clutter"   
+                else:
+                    print("why?")
+
 
 
             clutter_actor_model.train()
@@ -1091,7 +1352,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_policy_filename", type=str, default="ppo_policy.pth", help="Suffix for the output policy filename")
     parser.add_argument("--device", type=str, default="cpu", help="Device to use for training (e.g., cpu, cuda, cuda:0)")
     parser.add_argument("--train_map_directory", type=str, default="train_maps_0_clutter", help="train map")
-    
+    parser.add_argument("--use_leader_laser_only", action="store_true", help="whether there is laser in the environment")
 
 
     # Training Hyperparameters

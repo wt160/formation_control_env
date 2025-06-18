@@ -811,13 +811,11 @@ class BitmapObstacle(Entity):
                  color: Color = Color.BLACK):
         super().__init__(name, movable=False, rotatable=False, collide=True, shape=Bitmap())
         self.origin = origin
-        self.obstacle_value = obstacle_value
         self.collision_force = collision_force
         self.bitmap = bitmap
         self.resolution = resolution
         self.origin = torch.tensor(origin, device=self.device)
         self.obstacle_value = obstacle_value
-        self.collision_force = collision_force
         self.color = color
         
         # Precompute grid coordinates
@@ -877,117 +875,272 @@ class BitmapObstacle(Entity):
         indices = self.pos_to_grid(pos)
         return self.bitmap[torch.arange(self.batch_dim), indices[..., 1], indices[..., 0]]
     
-    def raycast(self, origin: Tensor, angles: Tensor, max_range: float) -> Tensor:
-        """Vectorized DDA raycasting with proper coordinate handling"""
-        # Normalize directions
-        dirs = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
-        dirs = dirs / torch.norm(dirs, dim=-1, keepdim=True).clamp(min=1e-8)
-        # print("dirs:{}".format(dirs))
-        batch_dim = origin.size(0)
-        device = origin.device
-        dists = torch.full((batch_dim,), max_range, device=device)
+    # def raycast(self, origin: Tensor, angles: Tensor, max_range: float) -> Tensor:
+    #     """Vectorized DDA raycasting with proper coordinate handling"""
+    #     # Normalize directions
+    #     dirs = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
+    #     dirs = dirs / torch.norm(dirs, dim=-1, keepdim=True).clamp(min=1e-8)
+    #     # print("dirs:{}".format(dirs))
+    #     batch_dim = origin.size(0)
+    #     device = origin.device
+    #     dists = torch.full((batch_dim,), max_range, device=device)
         
-        # Convert to grid coordinates [batch, 2]
-        continuous_grid = (origin - self.origin) / self.resolution  # [batch, 2]
-        # print("continuous grid:{}".format(continuous_grid))
-        cell = torch.floor(continuous_grid).long()  # Integer grid indices [batch, 2]
-        cell_frac = continuous_grid - cell.float()  # Fraction within cell [0,1)
+    #     # Convert to grid coordinates [batch, 2]
+    #     continuous_grid = (origin - self.origin) / self.resolution  # [batch, 2]
+    #     # print("continuous grid:{}".format(continuous_grid))
+    #     cell = torch.floor(continuous_grid).long()  # Integer grid indices [batch, 2]
+    #     cell_frac = continuous_grid - cell.float()  # Fraction within cell [0,1)
+    #     grid_width = self.bitmap.shape[2]
+    #     grid_height = self.bitmap.shape[1]
+    #     # cell = self.pos_to_grid(origin).float()
+    #     # print("cell_frac:{}".format(cell_frac))
+    #     # print("cell:{}".format(cell))
+    #     step = torch.sign(dirs).long()
+    #     step = torch.where(dirs.abs() < 1e-6, torch.zeros_like(step), step).long()
+    #     # print("step:{}".format(step))
+    #     # Grid dimensions [width, height]
+    #     # print("cell_frac/dirs:{}".format(cell_frac / dirs.abs()))
+    #     # cell_frac = cell - torch.floor(cell)
+    #     dirs_abs = dirs.abs().clamp(min=1e-8)
+    #     t_max = torch.where(
+    #         step != 0,
+    #         torch.where(
+    #             step > 0,
+    #             (1.0 - cell_frac) / dirs_abs,
+    #             cell_frac / dirs_abs
+    #         ),
+    #         torch.tensor(float('inf'), device=device)
+    #     ).clamp(min=0)
+        
+    #     t_delta = (1.0 / dirs_abs).clamp(max=1e5)# Prevent division overflow
+    #     # print("t_delta:{}".format(t_delta))
+    #     active = torch.ones(batch_dim, dtype=torch.bool, device=device)
+    #     current_t = torch.zeros(batch_dim, device=device)
+        
+    #     for _ in range(int(2 * max_range / self.resolution)):
+    #         if not active.any():
+    #             # print("break!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    #             break
+                
+    #         # Check current cell
+    #         cell_clamped = cell.clone()
+    #         cell_clamped[:, 0] = torch.clamp(cell_clamped[:, 0], 0, grid_width - 1)
+    #         cell_clamped[:, 1] = torch.clamp(cell_clamped[:, 1], 0, grid_height - 1)
+    #         # print("valid_cell:{}".format(valid_cell))
+    #         hit = torch.zeros_like(active)
+    #         # Access bitmap as [batch, y, x]
+    #         # print("cell value:{}".format(self.bitmap[
+    #         #     torch.arange(batch_dim, device=device),
+    #         #     cell_int[valid_cell, 1],  # y index
+    #         #     cell_int[valid_cell, 0]   # x index
+    #         # ]))
+    #         obstacle_mask = self.bitmap[
+    #         torch.arange(batch_dim, device=device),
+    #         cell_clamped[:, 1],  # y index
+    #         cell_clamped[:, 0]   # x index
+    #     ] == self.obstacle_value
+            
+    #         valid = (
+    #         (cell[:, 0] >= 0) & 
+    #         (cell[:, 0] < grid_width) &
+    #         (cell[:, 1] >= 0) & 
+    #         (cell[:, 1] < grid_height)
+    #     )
+    #         # print("obstacle_mask:{}".format(obstacle_mask))
+    #         hit[valid] = obstacle_mask[valid]
+    #         if hit.any():
+    #             current_dist = (continuous_grid - cell.float()).norm(dim=1) * self.resolution
+    #             dists = torch.where(hit, current_dist, dists)
+    #         # dists = torch.where(hit, torch.norm(origin - (cell_int * self.resolution + self.origin), dim=1), dists)
+    #             active &= ~hit
+            
+                
+    #         # print("step to next cell")
+    #         # Step to next cell
+    #         step_mask = t_max[:, 0] < t_max[:, 1]
+        
+    #         # Create axis mask [batch, 2] where True indicates axis to step
+    #         axis_mask = torch.stack([step_mask, ~step_mask], dim=1).long()
+            
+    #         # Update cell coordinates (only step in one axis per iteration)
+    #         cell += step * axis_mask
+
+    #         # step_mask = t_max[:, 0] < t_max[:, 1]
+    #         # step_mask_exp = step_mask.unsqueeze(-1)
+    #         # print("axis_mask:{}".format(axis_mask))
+    #         # step_sign = step * step_mask_exp.long()  # <-- Key fix: use long() here
+    #         # print("step_sign:{}".format(step_sign))
+            
+    #         # Update cell coordinates with integer math
+    #         # cell = torch.where(step_mask_exp, cell + step_sign, cell)
+            
+    #         # Update t_max with floating point math
+    #         t_max += t_delta * axis_mask.float()
+            
+    #         # Check termination
+    #         current_t = t_max.min(dim=1)[0] * self.resolution
+    #         active &= current_t <= max_range
+    #         # current_t = torch.max(t_max, dim=1)[0]
+    #         # print("current_t:{}".format(current_t))
+    #         # active &= current_t <= max_range
+    #         # print("active:{}".format(active))
+            
+    #     return dists
+
+
+
+    def raycast(self, origin: Tensor, angles: Tensor, max_range: float, bitmap_env_indices: Tensor) -> Tensor:
+        """
+        Vectorized DDA raycasting.
+        origin: Tensor of shape [N_rays, 2] - world coordinates of ray origins.
+        angles: Tensor of shape [N_rays] - world angles of rays in radians.
+        max_range: float - maximum distance to cast rays.
+        bitmap_env_indices: Tensor of shape [N_rays] - maps each ray to its env index for self.bitmap.
+        Returns: Tensor of shape [N_rays] - distances to hits, or max_range if no hit.
+        """
         grid_width = self.bitmap.shape[2]
         grid_height = self.bitmap.shape[1]
-        # cell = self.pos_to_grid(origin).float()
-        # print("cell_frac:{}".format(cell_frac))
-        # print("cell:{}".format(cell))
-        step = torch.sign(dirs).long()
-        step = torch.where(dirs.abs() < 1e-6, torch.zeros_like(step), step).long()
-        # print("step:{}".format(step))
-        # Grid dimensions [width, height]
-        # print("cell_frac/dirs:{}".format(cell_frac / dirs.abs()))
-        # cell_frac = cell - torch.floor(cell)
-        dirs_abs = dirs.abs().clamp(min=1e-8)
-        t_max = torch.where(
-            step != 0,
-            torch.where(
-                step > 0,
-                (1.0 - cell_frac) / dirs_abs,
-                cell_frac / dirs_abs
-            ),
-            torch.tensor(float('inf'), device=device)
-        ).clamp(min=0)
-        
-        t_delta = (1.0 / dirs_abs).clamp(max=1e5)# Prevent division overflow
-        # print("t_delta:{}".format(t_delta))
-        active = torch.ones(batch_dim, dtype=torch.bool, device=device)
-        current_t = torch.zeros(batch_dim, device=device)
-        
-        for _ in range(int(2 * max_range / self.resolution)):
-            if not active.any():
-                # print("break!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                break
-                
-            # Check current cell
-            cell_clamped = cell.clone()
-            cell_clamped[:, 0] = torch.clamp(cell_clamped[:, 0], 0, grid_width - 1)
-            cell_clamped[:, 1] = torch.clamp(cell_clamped[:, 1], 0, grid_height - 1)
-            # print("valid_cell:{}".format(valid_cell))
-            hit = torch.zeros_like(active)
-            # Access bitmap as [batch, y, x]
-            # print("cell value:{}".format(self.bitmap[
-            #     torch.arange(batch_dim, device=device),
-            #     cell_int[valid_cell, 1],  # y index
-            #     cell_int[valid_cell, 0]   # x index
-            # ]))
-            obstacle_mask = self.bitmap[
-            torch.arange(batch_dim, device=device),
-            cell_clamped[:, 1],  # y index
-            cell_clamped[:, 0]   # x index
-        ] == self.obstacle_value
-            
-            valid = (
-            (cell[:, 0] >= 0) & 
-            (cell[:, 0] < grid_width) &
-            (cell[:, 1] >= 0) & 
-            (cell[:, 1] < grid_height)
-        )
-            # print("obstacle_mask:{}".format(obstacle_mask))
-            hit[valid] = obstacle_mask[valid]
-            if hit.any():
-                current_dist = (continuous_grid - cell.float()).norm(dim=1) * self.resolution
-                dists = torch.where(hit, current_dist, dists)
-            # dists = torch.where(hit, torch.norm(origin - (cell_int * self.resolution + self.origin), dim=1), dists)
-                active &= ~hit
-            
-                
-            # print("step to next cell")
-            # Step to next cell
-            step_mask = t_max[:, 0] < t_max[:, 1]
-        
-            # Create axis mask [batch, 2] where True indicates axis to step
-            axis_mask = torch.stack([step_mask, ~step_mask], dim=1).long()
-            
-            # Update cell coordinates (only step in one axis per iteration)
-            cell += step * axis_mask
+        n_rays = origin.shape[0]
+        if n_rays == 0:
+            return torch.empty(0, device=self.device)
+        dirs = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1) # [N_rays, 2]
 
-            # step_mask = t_max[:, 0] < t_max[:, 1]
-            # step_mask_exp = step_mask.unsqueeze(-1)
-            # print("axis_mask:{}".format(axis_mask))
-            # step_sign = step * step_mask_exp.long()  # <-- Key fix: use long() here
-            # print("step_sign:{}".format(step_sign))
+        dists = torch.full((n_rays,), max_range, device=self.device, dtype=torch.float32)
+        active_rays = torch.ones(n_rays, dtype=torch.bool, device=self.device)
+
+        # Initial cell containing the ray origin
+        # self.origin is [1,2], origin is [N_rays,2]. Broadcasting handles (origin - self.origin).
+        continuous_grid_origin = (origin - self.origin) / self.resolution 
+        current_cell = torch.floor(continuous_grid_origin).long() # [N_rays, 2] (x_cell, y_cell)
+        
+        # Direction of stepping in grid
+        step = torch.sign(dirs).long()
+        # Ensure step is 0 if dir component is 0, to prevent t_max/t_delta issues with inf/nan
+        step = torch.where(torch.abs(dirs) < 1e-7, torch.zeros_like(step), step)
+
+
+        # Denominators for t_max and t_delta, ensuring they are not zero and have correct sign
+        # A small epsilon that depends on the sign of dirs to avoid issues if dir is exactly zero later
+        # (though step handling should mostly cover this for t_max/t_delta calculation)
+        epsilon_denom = 1e-7
+        safe_dirs_x = torch.where(torch.abs(dirs[:, 0]) < epsilon_denom, torch.copysign(torch.tensor(epsilon_denom, device=self.device), dirs[:,0]), dirs[:, 0])
+        safe_dirs_y = torch.where(torch.abs(dirs[:, 1]) < epsilon_denom, torch.copysign(torch.tensor(epsilon_denom, device=self.device), dirs[:,1]), dirs[:, 1])
+
+        # Robust access to self.origin components
+        origin_map_x = self.origin.view(-1)[0] 
+        origin_map_y = self.origin.view(-1)[1]
+        
+        # Calculate t_max: parametric distance 't' (world units along ray) to the first grid boundaries
+        next_x_boundary_grid = current_cell[:, 0] + (step[:, 0] > 0).float() # Grid coord of next x-line
+        next_y_boundary_grid = current_cell[:, 1] + (step[:, 1] > 0).float() # Grid coord of next y-line
+
+        # World coordinate of these next boundaries
+        next_x_boundary_world = next_x_boundary_grid * self.resolution + origin_map_x
+        next_y_boundary_world = next_y_boundary_grid * self.resolution + origin_map_y
+
+        t_max_x = torch.where(
+            step[:, 0] != 0, # Only calculate if there's movement along x
+            (next_x_boundary_world - origin[:, 0]) / safe_dirs_x,
+            torch.full_like(angles, float('inf'))
+        )
+        t_max_y = torch.where(
+            step[:, 1] != 0, # Only calculate if there's movement along y
+            (next_y_boundary_world - origin[:, 1]) / safe_dirs_y,
+            torch.full_like(angles, float('inf'))
+        )
+        # t_max stores the absolute world distance from ray origin to next intersection point with a grid line
+        t_max = torch.stack([t_max_x, t_max_y], dim=1) # [N_rays, 2]
+
+        # t_delta: world distance along ray needed to cross one full grid cell axially
+        t_delta = self.resolution / torch.abs(safe_dirs_y) # Use safe_dirs here as well
+        t_delta = self.resolution / torch.abs(dirs).clamp(min=1e-8) # abs_dirs_safe from before
+
+
+        max_dda_steps = int(max_range / self.resolution * 1.5) + 2 # Heuristic max steps
+        
+        for _ in range(max_dda_steps):
+            if not active_rays.any():
+                break
             
-            # Update cell coordinates with integer math
-            # cell = torch.where(step_mask_exp, cell + step_sign, cell)
+            # For currently active rays:
+            active_indices = active_rays.nonzero(as_tuple=True)[0]
+            if active_indices.numel() == 0: break # Should be caught by active_rays.any()
+
+            current_t_max_active = t_max[active_indices] # Distances from origin to next boundaries
             
-            # Update t_max with floating point math
-            t_max += t_delta * axis_mask.float()
+            # dist_to_enter_next_cell is the shortest distance from origin to cross any *next* boundary
+            dist_to_enter_next_cell, axis_to_step = torch.min(current_t_max_active, dim=1)
+
+            # Prune rays that would exceed max_range or their current best hit
+            can_hit_closer_or_in_range = (dist_to_enter_next_cell < dists[active_indices]) & \
+                                         (dist_to_enter_next_cell < max_range)
             
-            # Check termination
-            current_t = t_max.min(dim=1)[0] * self.resolution
-            active &= current_t <= max_range
-            # current_t = torch.max(t_max, dim=1)[0]
-            # print("current_t:{}".format(current_t))
-            # active &= current_t <= max_range
-            # print("active:{}".format(active))
+            # Update the global active_rays mask based on these conditions
+            rays_to_deactivate_this_iter = active_indices[~can_hit_closer_or_in_range]
+            active_rays[rays_to_deactivate_this_iter] = False
             
-        return dists
+            if not active_rays.any(): break # All remaining rays are too far or already hit closer
+
+            # Select data only for rays that are advancing in this iteration
+            # These are rays that were active AND passed the distance checks
+            advancing_mask_within_active = can_hit_closer_or_in_range
+            original_indices_of_advancing_rays = active_indices[advancing_mask_within_active]
+            
+            if original_indices_of_advancing_rays.numel() == 0: continue # No rays left to advance this iteration
+
+
+            current_cell_advancing = current_cell[original_indices_of_advancing_rays]
+            step_advancing = step[original_indices_of_advancing_rays]
+            t_delta_advancing = t_delta[original_indices_of_advancing_rays]
+            bitmap_env_idx_advancing = bitmap_env_indices[original_indices_of_advancing_rays]
+            
+            # The distance to the boundary of the cell we are *entering*
+            hit_distance_candidate = dist_to_enter_next_cell[advancing_mask_within_active]
+            axis_stepped_for_advancing = axis_to_step[advancing_mask_within_active]
+
+            # Step into the new cell
+            step_on_x = axis_stepped_for_advancing == 0
+            step_on_y = axis_stepped_for_advancing == 1
+
+            current_cell_advancing[step_on_x, 0] += step_advancing[step_on_x, 0]
+            current_cell_advancing[step_on_y, 1] += step_advancing[step_on_y, 1]
+            # current_cell[original_indices_of_advancing_rays] = current_cell_advancing # Update main current_cell later
+
+            # Check this new cell for collision
+            x_c = torch.clamp(current_cell_advancing[:, 0], 0, grid_width - 1)
+            y_c = torch.clamp(current_cell_advancing[:, 1], 0, grid_height - 1)
+            
+            hit_values = self.bitmap[bitmap_env_idx_advancing, y_c, x_c]
+            is_obstacle_hit = hit_values == self.obstacle_value # Shape [num_advancing_rays]
+
+            if is_obstacle_hit.any():
+                hit_within_advancing = is_obstacle_hit.nonzero(as_tuple=True)[0]
+                original_indices_of_final_hits = original_indices_of_advancing_rays[hit_within_advancing]
+                
+                dists[original_indices_of_final_hits] = hit_distance_candidate[hit_within_advancing]
+                active_rays[original_indices_of_final_hits] = False # Deactivate these rays
+            
+            # Update t_max for the axis that was stepped, ONLY for rays that just took that step
+            # and are still active (though deactivation happens above, this t_max update is for next iter)
+            t_max_to_update_globally = t_max[original_indices_of_advancing_rays]
+            
+            t_max_to_update_globally[step_on_x, 0] += t_delta_advancing[step_on_x, 0]
+            t_max_to_update_globally[step_on_y, 1] += t_delta_advancing[step_on_y, 1]
+            t_max[original_indices_of_advancing_rays] = t_max_to_update_globally
+            
+            # Update current_cell globally for the rays that stepped
+            current_cell[original_indices_of_advancing_rays] = current_cell_advancing
+            
+            # Final check on active_rays based on grid boundaries (redundant if clamp is perfect, but safe)
+            # active_rays &= (current_cell[:,0] >= 0) & (current_cell[:,0] < self.grid_width) & \
+            #                (current_cell[:,1] >= 0) & (current_cell[:,1] < self.grid_height)
+
+
+        return dists.clamp(max=max_range)
+
+
+    
+
 # properties of landmark entities
 class Landmark(Entity):
     def __init__(
@@ -1255,9 +1408,9 @@ class Agent(Entity):
         for geom in geoms:
             geom.set_color(*self.color, alpha=self._alpha)
         if self._sensors is not None:
-            pass
-            # for sensor in self._sensors:
-            #     geoms += sensor.render(env_index=env_index)
+            
+            for sensor in self._sensors:
+                geoms += sensor.render(env_index=env_index)
         # if self._render_action and self.state.force is not None:
         #     velocity = rendering.Line(
         #         self.state.pos[env_index],
@@ -1557,48 +1710,90 @@ class World(TorchVectorizedObject):
         d[behind_line.squeeze(-1)] = max_range
         return d
 
+
+
+
+
+
     def cast_ray(
         self,
-        entity: Entity,
-        angles: Tensor,
+        ray_origins: Tensor,    # Shape [Total_N_Rays, 2]
+        ray_world_angles: Tensor, # Shape [Total_N_Rays]
+        bitmap_env_indices_for_rays: Tensor, # New: maps each ray to its env_idx for bitmap access. Shape [Total_N_Rays]
         max_range: float,
-        entity_filter: Callable[[Entity], bool] = lambda _: False,
+        casting_entity: Entity, 
+        entity_filter: Callable[[Entity, Entity], bool] = lambda caster, target: False,
     ):
-        pos = entity.state.pos
-        # print("raycast")
-        assert pos.ndim == 2 and angles.ndim == 1
-        assert pos.shape[0] == angles.shape[0]
-
-        # Initialize with full max_range to avoid dists being empty when all entities are filtered
-        dists = [
-            torch.full((self.batch_dim,), fill_value=max_range, device=self.device)
+        num_total_rays = ray_origins.shape[0]
+        all_hit_dists_list = [
+            torch.full((num_total_rays,), fill_value=max_range, device=self.device, dtype=torch.float32)
         ]
-        for e in self.entities:
+
+        for e in self.entities: 
             if not isinstance(e, BitmapObstacle):
                 continue
-            # print("ray cast to bitmap")
-            bitmap_dists = e.raycast(
-                origin=entity.state.pos,
-                angles=angles,
-                max_range=max_range
-            )
-            dists.append(bitmap_dists)
-            # if entity is e or not entity_filter(e):
-            #     continue
-            # assert e.collides(entity) and entity.collides(
-            #     e
-            # ), "Rays are only casted among collidables"
-            # if isinstance(e.shape, Box):
-            #     d = self._cast_ray_to_box(e, pos, angles, max_range)
-            # elif isinstance(e.shape, Sphere):
-            #     d = self._cast_ray_to_sphere(e, pos, angles, max_range)
-            # elif isinstance(e.shape, Line):
-            #     d = self._cast_ray_to_line(e, pos, angles, max_range)
-            # else:
-            #     raise RuntimeError(f"Shape {e.shape} currently not handled by cast_ray")
-            # dists.append(d)
-        dist, _ = torch.min(torch.stack(dists, dim=-1), dim=-1)
-        return dist
+            
+            if isinstance(e, BitmapObstacle):
+                bitmap_dists = e.raycast(
+                    origin=ray_origins, 
+                    angles=ray_world_angles, 
+                    max_range=max_range,
+                    bitmap_env_indices=bitmap_env_indices_for_rays 
+                )
+                all_hit_dists_list.append(bitmap_dists)
+            # TODO: Add handling for other shapes
+
+        if len(all_hit_dists_list) > 0: 
+            stacked_dists = torch.stack(all_hit_dists_list, dim=-1)
+            min_dist_per_ray, _ = torch.min(stacked_dists, dim=-1)
+            return min_dist_per_ray 
+        else: 
+            return torch.full((num_total_rays,), fill_value=max_range, device=self.device, dtype=torch.float32)
+
+    
+    
+    # def cast_ray(
+    #     self,
+    #     entity: Entity,
+    #     angles: Tensor,
+    #     max_range: float,
+    #     entity_filter: Callable[[Entity], bool] = lambda _: False,
+    # ):
+    #     pos = entity.state.pos
+    #     # print("raycast")
+    #     assert pos.ndim == 2 and angles.ndim == 1
+    #     assert pos.shape[0] == angles.shape[0]
+
+    #     # Initialize with full max_range to avoid dists being empty when all entities are filtered
+    #     dists = [
+    #         torch.full((self.batch_dim,), fill_value=max_range, device=self.device)
+    #     ]
+    #     for e in self.entities:
+    #         if not isinstance(e, BitmapObstacle):
+    #             continue
+    #         # print("ray cast to bitmap")
+    #         bitmap_dists = e.raycast(
+    #             origin=entity.state.pos,
+    #             angles=angles,
+    #             max_range=max_range
+    #         )
+    #         dists.append(bitmap_dists)
+    #         # if entity is e or not entity_filter(e):
+    #         #     continue
+    #         # assert e.collides(entity) and entity.collides(
+    #         #     e
+    #         # ), "Rays are only casted among collidables"
+    #         # if isinstance(e.shape, Box):
+    #         #     d = self._cast_ray_to_box(e, pos, angles, max_range)
+    #         # elif isinstance(e.shape, Sphere):
+    #         #     d = self._cast_ray_to_sphere(e, pos, angles, max_range)
+    #         # elif isinstance(e.shape, Line):
+    #         #     d = self._cast_ray_to_line(e, pos, angles, max_range)
+    #         # else:
+    #         #     raise RuntimeError(f"Shape {e.shape} currently not handled by cast_ray")
+    #         # dists.append(d)
+    #     dist, _ = torch.min(torch.stack(dists, dim=-1), dim=-1)
+    #     return dist
 
     def get_distance_from_point(
         self, entity: Entity, test_point_pos, env_index: int = None

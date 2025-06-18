@@ -488,7 +488,7 @@ theta_limit = 0.3
 if train_env_type == "bitmap_tunnel":
     train_map_directory = "train_tunnel_maps_0"
 elif train_env_type == "bitmap":
-    train_map_directory = "train_maps_1_obstacle"
+    train_map_directory = "train_maps_0_clutter"
 def initialize_weights(module):
     if isinstance(module, (nn.Linear, nn.Conv2d)):
         nn.init.xavier_uniform_(module.weight)
@@ -510,7 +510,7 @@ critic_model = GATCritic(in_channels, hidden_dim, num_agents).to(device)
 # actor_model.load_state_dict(pretrained_weights)
 # expert_choose_net_weights = torch.load('best_expert_gate_net_free_clutter.pth')
 # pretrained_weights = torch.load('best_imitation_model_clutter.pth', map_location=device)
-clutter_pretrained_weights = torch.load(policy_filename, map_location=device)
+# clutter_pretrained_weights = torch.load(policy_filename, map_location=device)
 # free_pretrained_weights = torch.load('best_imitation_model_empty_noise_1.pth', map_location=device)
 
 
@@ -524,10 +524,10 @@ clutter_pretrained_weights = torch.load(policy_filename, map_location=device)
 # pretrained_weights = torch.load('best_gnn_model.pth', map_location=device)
 # free_actor_model.load_state_dict(free_pretrained_weights, strict=False)
 
-clutter_actor_model.load_state_dict(clutter_pretrained_weights, strict=False)
+# clutter_actor_model.load_state_dict(clutter_pretrained_weights, strict=False)
 # expert_gate_net.load_state_dict(expert_choose_net_weights, strict=False)
 # Initialize the critic network
-# clutter_actor_model.apply(initialize_weights)
+clutter_actor_model.apply(initialize_weights)
 critic_model.apply(initialize_weights)
 # model = GATActorCritic(in_channels, hidden_dim, action_dim, num_agents).to(device)
 from datetime import datetime
@@ -588,7 +588,7 @@ def compute_returns_and_advantages(rewards, masks, values, gamma, lam, device):
 #     return returns, advantages
 
 warm_up_epochs=0
-train_num_envs = 20
+train_num_envs = 5
 ep_rewards = []
 best_avg_reward = float('-inf')
 best_evaluation_reward = float('-inf')
@@ -1025,10 +1025,10 @@ for epoch in range(num_epochs):
             elif avg_eval_reward > 10000.0 and train_map_directory == "train_tunnel_maps_1":
                 train_map_directory = "train_tunnel_maps_2"
         elif train_env_type == "bitmap":
-            if avg_eval_reward > 10000.0 and train_map_directory == "train_maps_1_obstacle":
-                train_map_directory = "train_maps_2_obstacle"
-            elif avg_eval_reward > 10000.0 and train_map_directory == "train_maps_2_obstacle":
-                train_map_directory = "train_maps_3_obstacle"
+            if avg_eval_reward > 10000.0 and train_map_directory == "train_maps_0_clutter":
+                train_map_directory = "train_maps_1_clutter"
+            elif avg_eval_reward > 10000.0 and train_map_directory == "train_maps_1_clutter":
+                train_map_directory = "train_maps_2_clutter"
             elif avg_eval_reward > 10000.0 and train_map_directory == "train_maps_3_obstacle":
                 train_map_directory = "train_maps_4_obstacle"
             elif avg_eval_reward > 10000.0 and train_map_directory == "train_maps_4_obstacle":
