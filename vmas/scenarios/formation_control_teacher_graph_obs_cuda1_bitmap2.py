@@ -3317,31 +3317,31 @@ class Scenario(BaseScenario):
             
 
             inflation_radius = 0.0
-            # if self.train_map_directory == "train_maps_0_clutter":
-            #     inflation_radius = 3.0
-            # elif self.train_map_directory == "train_maps_1_clutter":
-            #     inflation_radius = 2.5
-            # elif self.train_map_directory == "train_maps_2_clutter":
-            #     inflation_radius = 2.0
-            # elif self.train_map_directory == "train_maps_3_clutter":
-            #     inflation_radius = 1.5
-            # elif self.train_map_directory == "train_maps_4_clutter":
-            #     inflation_radius = 1.0
-            # elif self.train_map_directory == "train_maps_5_clutter":
-            #     inflation_radius = 0.5
-
             if self.train_map_directory == "train_maps_0_clutter":
-                inflation_radius = 0.5
+                inflation_radius = 3.0
             elif self.train_map_directory == "train_maps_1_clutter":
-                inflation_radius = 0.5
+                inflation_radius = 2.5
             elif self.train_map_directory == "train_maps_2_clutter":
-                inflation_radius = 0.5
+                inflation_radius = 2.0
             elif self.train_map_directory == "train_maps_3_clutter":
-                inflation_radius = 0.5
+                inflation_radius = 1.5
             elif self.train_map_directory == "train_maps_4_clutter":
-                inflation_radius = 0.5
+                inflation_radius = 1.0
             elif self.train_map_directory == "train_maps_5_clutter":
                 inflation_radius = 0.5
+
+            # if self.train_map_directory == "train_maps_0_clutter":
+            #     inflation_radius = 0.5
+            # elif self.train_map_directory == "train_maps_1_clutter":
+            #     inflation_radius = 0.5
+            # elif self.train_map_directory == "train_maps_2_clutter":
+            #     inflation_radius = 0.5
+            # elif self.train_map_directory == "train_maps_3_clutter":
+            #     inflation_radius = 0.5
+            # elif self.train_map_directory == "train_maps_4_clutter":
+            #     inflation_radius = 0.5
+            # elif self.train_map_directory == "train_maps_5_clutter":
+            #     inflation_radius = 0.5
 
 
 
@@ -4612,10 +4612,10 @@ class Scenario(BaseScenario):
     def single_agent_collision_obstacle_rew(self, agent):
         #agent.collision_obstacle_rew is of shape torch.zeros(batch_dim, device=device)
         # self.current_lidar_reading  is of shape [batch_size, lidar_ray_num] 
-        self.LIDAR_DANGER_THRESHOLD = 0.2  # meters
-        self.LIDAR_CRITICAL_DISTANCE = 0.05 # meters
-        self.CRITICAL_DISTANCE_PENALTY = -10.0
-        self.NORMAL_DANGER_PENALTY_SCALE = -2.0 # Adjusted scale for more impact
+        self.LIDAR_DANGER_THRESHOLD = 1.0  # meters
+        self.LIDAR_CRITICAL_DISTANCE = 0.25 # meters
+        self.CRITICAL_DISTANCE_PENALTY = -1000.0
+        self.NORMAL_DANGER_PENALTY_SCALE = -20.0 # Adjusted scale for more impact
         current_agent_index = self.world.agents.index(agent)
 
         lidar_readings = self.current_lidar_reading   # Shape: [batch_dim, lidar_ray_num]
@@ -4626,10 +4626,8 @@ class Scenario(BaseScenario):
 
         # Mask for readings below the critical distance
         critical_mask = lidar_readings < self.LIDAR_CRITICAL_DISTANCE
-        
         # Mask for readings in the "danger zone" (below danger threshold but not critical)
         danger_mask = (lidar_readings < self.LIDAR_DANGER_THRESHOLD) & (~critical_mask)
-
         # Calculate penalties for critical distances
         # Assign CRITICAL_DISTANCE_PENALTY where critical_mask is true, 0 otherwise
         critical_penalties = torch.where(
@@ -5070,7 +5068,7 @@ class Scenario(BaseScenario):
             self.group_center_diff_rew = self.compute_group_center_reward()
         #leader robot do not contribute to the reward
 
-        # agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
+        agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
         if self.env_type == "bitmap":
             
             agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
@@ -5127,7 +5125,8 @@ class Scenario(BaseScenario):
         agent.connection_rew = 30*agent.connection_rew
         agent.action_diff_rew = 50*agent.action_diff_rew
         agent.angle_diff_with_leader_rew = 0.8*agent.angle_diff_with_leader_rew
-        agent.collision_obstacle_rew = 0.03* agent.collision_obstacle_rew
+        agent.collision_obstacle_rew = 3* agent.collision_obstacle_rew
+        agent.pos_rew = 5* agent.pos_rew
         # agent.target_collision_rew = 10*agent.target_collision_rew
         # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
         # return agent.angle_diff_with_leader_rew + agent.agent_collision_rew + agent.connection_rew + agent.action_diff_rew + agent.target_collision_rew 
@@ -5146,7 +5145,7 @@ class Scenario(BaseScenario):
             #     rewards_setup1        # Value if condition is False
             # ) 
             
-            return agent.pos_rew + agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew
+            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew + agent.collision_obstacle_rew
 
             # return agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.collision_obstacle_rew
         elif self.env_type == "bitmap_tunnel":
@@ -5492,7 +5491,7 @@ class Scenario(BaseScenario):
             # print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
             raw_lidar_reading = agent.sensors[0].measure()
             lidar_observation_tensor = [(agent.sensors[0]._max_range - raw_lidar_reading) / agent.sensors[0]._max_range]
-            self.current_lidar_reading = lidar_observation_tensor[0]
+            self.current_lidar_reading = raw_lidar_reading
             if current_agent_index == 0:
                 # agnet.sensors[0].measure()   shape: [batch_size, lidar_ray_num]
                 # print("leader lidar reading shape:{}".format(agent.sensors[0].measure().shape))  

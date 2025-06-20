@@ -653,6 +653,7 @@ def main(args):
     device = torch.device("cpu")
     from datetime import datetime
     output_policy_filename = args.output_policy_filename
+    output_critic_filename = args.output_critic_filename
     # TensorBoard writer
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = os.path.join("runs", experiment_name, current_time)
@@ -716,15 +717,22 @@ def main(args):
 
     critic_model = GATCritic(in_channels, hidden_dim, num_agents).to(device)
 
-    # clutter_pretrained_weights = torch.load(args.policy_filename, map_location=device)
+    if args.policy_filename != "":
+        policy_pretrained_weights = torch.load(args.policy_filename, map_location=device)
+        policy_pretrained_weights = {k: v for k, v in policy_pretrained_weights.items() if k in clutter_actor_model.state_dict()}
+        clutter_actor_model.load_state_dict(policy_pretrained_weights)
+        print("load policy from {}".format(args.policy_filename))
 
-    # clutter_pretrained_weights = {k: v for k, v in clutter_pretrained_weights.items() if k in clutter_actor_model.state_dict()}
-    # clutter_actor_model.load_state_dict(clutter_pretrained_weights)
+    else:
+        clutter_actor_model.apply(initialize_weights)
+    if args.critic_filename != "":
+        critic_pretrained_weights = torch.load(args.critic_filename, map_location=device )
+        critic_pretrained_weights = {k: v for k, v in critic_pretrained_weights.items() if k in critic_model.state_dict()}
+        critic_model.load_state_dict(critic_pretrained_weights)
+        print("load critic from {}".format(args.critic_filename))
+    else:
+        critic_model.apply(initialize_weights)
 
-
-
-    clutter_actor_model.apply(initialize_weights)
-    critic_model.apply(initialize_weights)
     # model = GATActorCritic(in_channels, hidden_dim, action_dim, num_agents).to(device)
     from datetime import datetime
 
@@ -1214,7 +1222,7 @@ def main(args):
             eval_rewards_all_episodes = []
             eval_epoch_restart_num = 2 # Number of different evaluation scenarios
             eval_num_envs = 1 # Evaluate one environment at a time for clear video/metrics
-            eval_steps_per_episode = 500
+            eval_steps_per_episode = 700
 
             # For simplicity, collision/connection metrics are not re-implemented here
             # but would follow a similar pattern to the training loop's info handling if needed.
@@ -1305,6 +1313,8 @@ def main(args):
             if avg_eval_reward > best_evaluation_reward:
                 best_evaluation_reward = avg_eval_reward
                 torch.save(clutter_actor_model.state_dict(), output_policy_filename)
+                torch.save(critic_model.state_dict(), output_critic_filename)
+
                 print(f'New best evaluation model saved with avg_reward: {best_evaluation_reward:.4f}')
                 if eval_idx == 0 and current_episode_frames : # Save best video again if it's also the first
                     save_video(f"{log_dir}/BEST_eval_E{epoch+1}", current_episode_frames, fps=15)
@@ -1325,10 +1335,10 @@ def main(args):
                     train_map_directory = "train_maps_2_clutter"
                 elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_2_clutter":
                     train_map_directory = "train_maps_3_clutter"
-                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_3_clutter":
-                    train_map_directory = "train_maps_4_clutter"   
-                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_4_clutter":
-                    train_map_directory = "train_maps_5_clutter"   
+                # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_3_clutter":
+                #     train_map_directory = "train_maps_4_clutter"   
+                # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_4_clutter":
+                #     train_map_directory = "train_maps_5_clutter"   
                 else:
                     print("why?")
 
@@ -1349,7 +1359,9 @@ if __name__ == "__main__":
     parser.add_argument("--experiment_name", type=str, default="ppo_experiment", help="Unique name for the experiment run")
     parser.add_argument("--train_env_type", type=str, required=True, help="Type of training environment (e.g., clutter, door_and_narrow, tunnel, bitmap)")
     parser.add_argument("--policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
+    parser.add_argument("--critic_filename", type=str, default="", help="Path to pre-trained critic to load (optional)")
     parser.add_argument("--output_policy_filename", type=str, default="ppo_policy.pth", help="Suffix for the output policy filename")
+    parser.add_argument("--output_critic_filename", type=str, default="ppo_critic.pth", help="Suffix for the output policy filename")
     parser.add_argument("--device", type=str, default="cpu", help="Device to use for training (e.g., cpu, cuda, cuda:0)")
     parser.add_argument("--train_map_directory", type=str, default="train_maps_0_clutter", help="train map")
     parser.add_argument("--use_leader_laser_only", action="store_true", help="whether there is laser in the environment")
