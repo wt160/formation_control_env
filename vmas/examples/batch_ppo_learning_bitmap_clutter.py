@@ -11,8 +11,8 @@ experiment_configurations = [
     {
         "experiment_name": "ppo_bitmap_lr3e4_std0.2_rwg1_rwc-0.5",
         "train_env_type": "bitmap",
-        "policy_filename": "ppo_bitmap_empty.pth", # Optional: if you have one
-        "critic_filename": "ppo_bitmap_empty_critic.pth", 
+        "policy_filename": "", # Optional: if you have one
+        "critic_filename": "", 
         "output_policy_filename": "ppo_bitmap_clutter.pth",
         "output_critic_filename": "ppo_bitmap_clutter_critic.pth",
         "steps_per_epoch": 700,
@@ -25,7 +25,7 @@ experiment_configurations = [
         "num_envs": 20,
         "seed": 0,
         "has_laser": True,
-        "train_map_directory": "train_maps_0_clutter",
+        "train_map_directory": "train_maps_1_clutter",
         "use_leader_laser_only": False,
     },
     # {5_rwc-0.8_seed1",

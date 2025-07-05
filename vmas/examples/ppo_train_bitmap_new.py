@@ -149,8 +149,8 @@ class VMASWrapper:
         nominal_pos_tensor = torch.stack(nominal_pos_obs, dim=1)
         leader_vel_tensor = torch.stack(leader_vel, dim=1)
         leader_ang_vel_tensor = torch.stack(leader_ang_vel, dim=1)
-        print("nominal pos tensor shape:{}".format(nominal_pos_tensor.shape))    #[2, 5, 3]
-        print("last action u tensor shape:{}".format(last_action_tensor.shape))    #[2, 5, 3]
+        # print("nominal pos tensor shape:{}".format(nominal_pos_tensor.shape))    #[2, 5, 3]
+        # print("last action u tensor shape:{}".format(last_action_tensor.shape))    #[2, 5, 3]
 
         # print("nominal pos:{}".format(nominal_pos_tensor))
         # print("laser tensor shape:{}".format(laser_tensor.shape))   #   [2, 5, 20]
@@ -174,7 +174,7 @@ class VMASWrapper:
             laser_flat = laser_tensor.reshape(-1, laser_dim)
             reshaped_tensor = forward_opening_tensor.reshape(2, -1) # -1 infers the dimension size, which will be 5*20=100
             forward_opening_flat = reshaped_tensor.transpose(0, 1)
-        print("last_action_dim:{}".format(last_action_dim))
+        # print("last_action_dim:{}".format(last_action_dim))
 
         last_action_flat = last_action_tensor.reshape(-1, last_action_dim)
         relative_pos_flat = relative_pos_tensor.reshape(-1, pos_dim)
@@ -186,8 +186,8 @@ class VMASWrapper:
         # combined = torch.cat([laser_flat, relative_pos_flat, leader_vel_flat, leader_ang_vel_flat, nominal_pos_flat], dim=1)
         
         # combined = torch.cat([relative_pos_flat, leader_vel_flat, leader_ang_vel_flat, nominal_pos_flat], dim=1)
-        print("last_action_flat shape:{}".format(last_action_flat.shape))
-        print("nominal_pos flat shape:{}".format(nominal_pos_flat.shape))
+        # print("last_action_flat shape:{}".format(last_action_flat.shape))
+        # print("nominal_pos flat shape:{}".format(nominal_pos_flat.shape))
 
         # print("forward_opening hsape:{}".format(forward_opening_flat.shape))
         # print("relative_pos_flat shape:{}".format(relative_pos_flat.shape))
@@ -561,6 +561,98 @@ class GATActorWithLaser(nn.Module):
         agent_embeddings = x[agent_node_indices]
         return agent_embeddings
 
+
+class GATCriticWithLaser(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_agents):
+        """
+        Initializes the Critic model with LiDAR processing capabilities.
+        Args:
+            in_channels (int): Total dimension of the raw node features (including LiDAR).
+            hidden_channels (int): Dimension for hidden layers in GNN and MLPs.
+            num_agents (int): Number of agents in the simulation.
+        """
+        super(GATCriticWithLaser, self).__init__()
+        self.num_agents = num_agents
+        self.lidar_dim = 20 # As defined in your actor
+        self.last_action_dim = 3 # As defined in your actor
+        self.non_lidar_feature_dim = in_channels - self.lidar_dim - self.last_action_dim
+
+        # --- Feature Encoders (Mirrors the Actor's Encoders) ---
+
+        # 1. 1D CNN LiDAR Encoder
+        lidar_cnn_hidden_channels_c1 = 16
+        lidar_cnn_hidden_channels_c2 = 32
+        lidar_embedding_dim = 5 # Should match the actor's embedding dim
+        self.lidar_encoder_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.Conv1d(in_channels=lidar_cnn_hidden_channels_c1, out_channels=lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(lidar_cnn_hidden_channels_c2, lidar_embedding_dim),
+            nn.ReLU()
+        )
+
+        # 2. GAT Layers for non-LiDAR relational features
+        self.conv1 = GATConv(self.non_lidar_feature_dim, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        self.gnn_output_dim = hidden_channels * 8
+
+        # 3. Global Pooling Layer
+        self.pool = global_mean_pool
+
+        # --- Critic Head (Value Estimation) ---
+        # Input to the critic head is the concatenation of globally pooled features
+        # from the GNN, LiDAR encoder, and last actions.
+        critic_head_input_dim = self.gnn_output_dim + lidar_embedding_dim + self.last_action_dim
+        self.critic_fc1 = nn.Linear(critic_head_input_dim, hidden_channels * 4)
+        self.critic_fc2 = nn.Linear(hidden_channels * 4, 1)  # Outputs a single scalar state value
+
+    def forward(self, data: Batch):
+        x_all_features, edge_index, edge_attr, batch_map = data.x, data.edge_index, data.edge_attr, data.batch
+
+        # Split the input features just like in the actor
+        raw_lidar_scans_all_nodes = x_all_features[:, :self.lidar_dim]
+        original_node_features = x_all_features[:, self.lidar_dim : self.lidar_dim + self.non_lidar_feature_dim]
+        last_action_features = x_all_features[:, self.lidar_dim + self.non_lidar_feature_dim:]
+
+        # --- 1. Process LiDAR Features ---
+        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
+        # Globally pool the processed LiDAR features to get a single vector per graph
+        global_lidar_embedding = self.pool(processed_lidar_features, batch_map)
+
+        # --- 2. Process Relational Features with GNN ---
+        x_gnn = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1) if edge_attr is not None and edge_attr.dim() > 1 else edge_attr)
+        x_gnn = torch.relu(x_gnn)
+        x_gnn = self.conv2(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
+        x_gnn = torch.relu(x_gnn)
+        x_gnn = self.conv3(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
+        node_gnn_embeddings = torch.relu(x_gnn)
+        # Globally pool the GNN output features
+        global_gnn_embedding = self.pool(node_gnn_embeddings, batch_map)
+
+        # --- 3. Process Last Action Features ---
+        # Globally pool the last action features to get an average action representation
+        global_last_action_embedding = self.pool(last_action_features, batch_map)
+        
+        # --- 4. Fusion and Value Estimation ---
+        # Concatenate all global embeddings to form a comprehensive state representation
+        combined_global_features = torch.cat([
+            global_gnn_embedding, 
+            global_lidar_embedding, 
+            global_last_action_embedding
+        ], dim=1)
+
+        # Pass through the critic's MLP head to get the state value
+        critic_hidden = F.relu(self.critic_fc1(combined_global_features))
+        state_value = self.critic_fc2(critic_hidden)
+        
+        return state_value
+
+
 class GATCritic(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_agents):
         super(GATCritic, self).__init__()
@@ -715,7 +807,8 @@ def main(args):
     else:
         clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
 
-    critic_model = GATCritic(in_channels, hidden_dim, num_agents).to(device)
+    
+    critic_model = GATCriticWithLaser(in_channels + 20 + 3, hidden_dim, num_agents).to(device)
 
     if args.policy_filename != "":
         policy_pretrained_weights = torch.load(args.policy_filename, map_location=device)
@@ -1101,7 +1194,7 @@ def main(args):
         
         
         # PPO update
-        print("num_total_transitions :{}".format(num_total_transitions))
+        # print("num_total_transitions :{}".format(num_total_transitions))
         for _ in range(ppo_epochs):
             permutation_indices = torch.randperm(num_total_transitions, device=device)
             for start_idx in range(0, num_total_transitions, mini_batch_size_graphs):
@@ -1112,7 +1205,7 @@ def main(args):
                 mb_indices = permutation_indices[start_idx:end_idx]
 
 
-                print("epoch_forward_opening length:{}".format(len(epoch_forward_opening_list)))
+                # print("epoch_forward_opening length:{}".format(len(epoch_forward_opening_list)))
                 # Create minibatch of Data objects
                 forward_opening_list_mb = [epoch_forward_opening_list[i] for i in mb_indices.cpu().tolist()] 
                 obs_data_list_mb = [epoch_obs_data_list[i] for i in mb_indices.cpu().tolist()] # Get Data objs

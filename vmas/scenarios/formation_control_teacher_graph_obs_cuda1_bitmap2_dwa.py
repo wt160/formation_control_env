@@ -302,6 +302,10 @@ class Scenario(BaseScenario):
                     device=device,
                 )
 
+        self.last_apf_velocity = torch.zeros(
+                (batch_dim, 3),
+                device=device
+            )
         self.formation_center_pos = torch.zeros(
                 (batch_dim, 3),
                 device=device
@@ -3256,51 +3260,12 @@ class Scenario(BaseScenario):
         return agent_pose_global
 
     def set_action_mean(self, actions):
-        print("actions mean shape:{}".format(actions.shape))
+        # print("actions mean shape:{}".format(actions.shape))
         #actions mean shape:torch.Size([20, 5, 3])
         for i in range(self.n_agents):   
             self.current_action_mean[i] = actions[:, i, :]
-            print("self last_actionu shape:{}, {}".format(i, self.current_action_mean[i].shape))
+            # print("self last_actionu shape:{}, {}".format(i, self.current_action_mean[i].shape))
         # self.last_action_u
-
-    def _is_path_near_obstacles(self, path, bitmap, check_radius_pixels, min_near_points_ratio=0.1):
-        """
-        Checks if a path has a sufficient portion of its points near an obstacle.
-
-        Args:
-            path (list): The path as a list of (y, x) coordinates.
-            bitmap (np.array): The environment bitmap where 0 represents an obstacle.
-            check_radius_pixels (int): The radius (in pixels) around each waypoint to check for obstacles.
-            min_near_points_ratio (float): The minimum ratio of waypoints that must be "near" an obstacle
-                                           for the path to be considered valid.
-
-        Returns:
-            bool: True if the path is sufficiently near obstacles, False otherwise.
-        """
-        if not path:
-            return False
-
-        near_obstacle_point_count = 0
-        height, width = bitmap.shape
-
-        for y, x in path:
-            # Define a square window to check around the current waypoint
-            y_min = max(0, y - check_radius_pixels)
-            y_max = min(height, y + check_radius_pixels + 1)
-            x_min = max(0, x - check_radius_pixels)
-            x_max = min(width, x + check_radius_pixels + 1)
-
-            window = bitmap[y_min:y_max, x_min:x_max]
-            
-            # If any obstacle (value 0) is found in the window, this point is "near"
-            if np.any(window == 0):
-                near_obstacle_point_count += 1
-        
-        # Check if the ratio of "near" points meets the minimum requirement
-        if len(path) > 0 and (near_obstacle_point_count / len(path)) >= min_near_points_ratio:
-            return True
-        
-        return False
 
     def get_leader_paths(self, max_trials=1000):
         """
@@ -3323,7 +3288,7 @@ class Scenario(BaseScenario):
         
         for dim in range(self.batch_dim):
             # print("compute path {}".format(dim))
-            print("get_leader path dim:{}".format(dim))
+            # print("get_leader path dim:{}".format(dim))
             bitmap = self.bitmap.bitmap[dim, :]
             origin = [-12.8, -12.8]  # Example origin coordinates (bottom-left corner)
             scale = 0.1
@@ -3387,7 +3352,7 @@ class Scenario(BaseScenario):
             # Try finding a path for max_trials attempts
             for trial in range(max_trials):
                 # Randomly pick a target point
-                print("trial:{}".format(trial))
+                # print("trial:{}".format(trial))
                 target_found = False
                 for _ in range(1000):  # Try 100 random points before giving up on this trial
                     if self.env_type == "bitmap_tunnel":
@@ -3450,7 +3415,7 @@ class Scenario(BaseScenario):
                         self.batch_leader_paths.append(world_path)
 
                         target_found = True
-                        print("path found")
+                        # print("path found")
                         break
                     else:
                         continue
@@ -3470,6 +3435,45 @@ class Scenario(BaseScenario):
 
         return self.batch_leader_paths
     
+    def _is_path_near_obstacles(self, path, bitmap, check_radius_pixels, min_near_points_ratio=0.1):
+        """
+        Checks if a path has a sufficient portion of its points near an obstacle.
+
+        Args:
+            path (list): The path as a list of (y, x) coordinates.
+            bitmap (np.array): The environment bitmap where 0 represents an obstacle.
+            check_radius_pixels (int): The radius (in pixels) around each waypoint to check for obstacles.
+            min_near_points_ratio (float): The minimum ratio of waypoints that must be "near" an obstacle
+                                           for the path to be considered valid.
+
+        Returns:
+            bool: True if the path is sufficiently near obstacles, False otherwise.
+        """
+        if not path:
+            return False
+
+        near_obstacle_point_count = 0
+        height, width = bitmap.shape
+
+        for y, x in path:
+            # Define a square window to check around the current waypoint
+            y_min = max(0, y - check_radius_pixels)
+            y_max = min(height, y + check_radius_pixels + 1)
+            x_min = max(0, x - check_radius_pixels)
+            x_max = min(width, x + check_radius_pixels + 1)
+
+            window = bitmap[y_min:y_max, x_min:x_max]
+            
+            # If any obstacle (value 0) is found in the window, this point is "near"
+            if np.any(window == 0):
+                near_obstacle_point_count += 1
+        
+        # Check if the ratio of "near" points meets the minimum requirement
+        if len(path) > 0 and (near_obstacle_point_count / len(path)) >= min_near_points_ratio:
+            return True
+        
+        return False
+
 
     def compute_leader_init_direction(self, world_path):
         """
@@ -3783,7 +3787,365 @@ class Scenario(BaseScenario):
         return torch.atan2(torch.sin(angle), torch.cos(angle))
 
 
+    def get_apf_velocity(self, agent, agent_idx: int, last_velocity_command: Tensor) -> Tensor:
+        """
+        Computes the optimal velocity command (vx, vy, vyaw) for a holonomic agent
+        using an improved Artificial Potential Field (APF) method.
 
+        Args:
+            agent: The agent object for which to compute the velocity.
+            agent_idx (int): The index of the follower agent (0 for first follower, etc.).
+            last_velocity_command (Tensor): The velocity command from the previous timestep,
+                                            shape [batch_dim, 3], used for damping.
+
+        Returns:
+            torch.Tensor: A tensor of shape [batch_dim, 3] containing the chosen
+                          (vx, vy, vyaw) for each environment in the batch.
+        """
+
+
+        self.APF_ATTRACTIVE_GAIN = 5.0              # Scaling factor for pull towards the goal
+        self.APF_REPULSIVE_GAIN = 7.6               # Scaling factor for push from obstacles
+        self.APF_OBSTACLE_INFLUENCE_RADIUS = 0.5    # Distance (m) at which obstacles start exerting a force
+        self.APF_GOAL_TOLERANCE = 0.03              # Distance (m) to the goal to stop linear motion
+        
+        # --- Robot Dynamic Constraints (similar to DWA) ---
+        self.APF_MAX_SPEED_X = 1.0  # m/s
+        self.APF_MAX_SPEED_Y = 0.3  # m/s, lateral velocity
+        self.APF_MAX_SPEED_YAW = 1.0 # rad/s
+        self.APF_VELOCITY_DAMPING = 0.5
+        # Gain for the perpendicular force that helps escape local minima.
+        self.APF_ESCAPE_FORCE_GAIN = 0.4
+        # --- 0. Get Current State, Goal, and Sensor Data ---
+        local_target_pose = self.formation_goals[agent_idx]
+        lidar_readings = agent.sensors[0].measure()
+        lidar_angles_local = agent.sensors[0]._angles
+        # lidar_range_min = agent.sensors[0]._min_range
+
+        batch_dim = local_target_pose.shape[0]
+
+        # --- 1. Calculate Attractive Force ---
+        goal_vec = local_target_pose[:, :2] - agent.state.pos # Shape: [batch_dim, 2]
+        goal_dist = torch.norm(goal_vec, dim=1, keepdim=True)
+        unit_goal_vec = goal_vec / (goal_dist + 1e-6)
+        
+        attractive_force = torch.where(
+            goal_dist > self.APF_GOAL_TOLERANCE,
+            self.APF_ATTRACTIVE_GAIN * goal_vec,
+            torch.zeros_like(goal_vec)
+        )
+
+        # --- 2. Calculate Total Repulsive Force ---
+        repulsive_force = torch.zeros(batch_dim, 2, device=self.device)
+        escape_force = torch.zeros(batch_dim, 2, device=self.device) # For escaping local minima
+
+        mask = (lidar_readings < self.APF_OBSTACLE_INFLUENCE_RADIUS) & (lidar_readings > 0)
+        dist_inv = 1.0 / (lidar_readings + 1e-6)
+        radius_inv = 1.0 / self.APF_OBSTACLE_INFLUENCE_RADIUS
+        repulsive_magnitude = self.APF_REPULSIVE_GAIN * (dist_inv - radius_inv) * (dist_inv**2)
+        repulsive_magnitude = torch.where(mask, repulsive_magnitude, 0.0)
+
+        force_vec_x = -torch.cos(lidar_angles_local + agent.state.rot) * repulsive_magnitude
+        force_vec_y = -torch.sin(lidar_angles_local + agent.state.rot) * repulsive_magnitude
+
+        repulsive_force[:, 0] = torch.sum(force_vec_x, dim=1)
+        repulsive_force[:, 1] = torch.sum(force_vec_y, dim=1)
+
+        # --- 3. Goal-Oriented Repulsion (to escape local minima) ---
+        # Check if the attractive and repulsive forces are nearly opposing
+        dot_product = torch.sum(unit_goal_vec * repulsive_force, dim=1)
+        # Condition is true if repulsion is strong and points against the goal direction
+        stuck_condition = (dot_product < -0.5) & (goal_dist.squeeze(-1) > self.APF_GOAL_TOLERANCE)
+        
+        if stuck_condition.any():
+            # Generate a force perpendicular to the goal direction to "slide"
+            # Rotate goal vector by 90 degrees (x,y) -> (-y,x)
+            perp_force_dir = torch.stack([-unit_goal_vec[:, 1], unit_goal_vec[:, 0]], dim=1)
+            # Apply this force only where the agent is stuck
+            escape_force = torch.where(stuck_condition.unsqueeze(1), 
+                                       self.APF_ESCAPE_FORCE_GAIN * perp_force_dir, 
+                                       torch.zeros_like(escape_force))
+
+        # --- 4. Combine Forces and Convert to Velocity Command ---
+        resultant_force = attractive_force + repulsive_force + escape_force
+
+        desired_vx = resultant_force[:, 0]
+        desired_vy = resultant_force[:, 1]
+        
+        angle_to_force_vector = torch.atan2(resultant_force[:, 1], resultant_force[:, 0])
+        # angle_error_to_goal_rot = self._normalize_angle(local_target_pose[:, 2] - agent.state.rot.squeeze(-1))
+        angle_error_to_goal_rot = self._normalize_angle(local_target_pose[:, 2] - agent.state.rot.squeeze(-1))
+        # desired_w = (0.7 * angle_to_force_vector) + (0.3 * angle_error_to_goal_rot)
+        desired_w = 1.5 * angle_error_to_goal_rot
+
+        at_goal_mask = (goal_dist.squeeze(-1) <= self.APF_GOAL_TOLERANCE)
+        no_repulsion_mask = (torch.norm(repulsive_force, dim=1) < 1e-3)
+        desired_w = torch.where(at_goal_mask & no_repulsion_mask, 0.0, desired_w)
+        
+        # --- 5. Clamp velocities to respect physical limits ---
+        clamped_vx = torch.clamp(desired_vx, -self.APF_MAX_SPEED_X, self.APF_MAX_SPEED_X)
+        clamped_vy = torch.clamp(desired_vy, -self.APF_MAX_SPEED_Y, self.APF_MAX_SPEED_Y)
+        clamped_w = torch.clamp(desired_w, -self.APF_MAX_SPEED_YAW, self.APF_MAX_SPEED_YAW)
+
+        # --- 6. Apply Damping / Inertia for Smoothing ---
+        # Blend the new command with the last executed command
+        alpha = self.APF_VELOCITY_DAMPING
+        final_vx = (1 - alpha) * clamped_vx + alpha * last_velocity_command[:, 0]
+        final_vy = (1 - alpha) * clamped_vy + alpha * last_velocity_command[:, 1]
+        final_w = (1 - alpha) * clamped_w + alpha * last_velocity_command[:, 2]
+
+        return torch.stack([final_vx, final_vy, final_w], dim=1)
+
+    # def get_apf_velocity(self, agent, agent_idx: int) -> Tensor:
+    #     """
+    #     Computes the optimal velocity command (vx, vy, vyaw) for a holonomic agent
+    #     using the Artificial Potential Field (APF) method.
+
+    #     Args:
+    #         agent: The agent object for which to compute the velocity.
+    #         agent_idx (int): The index of the follower agent (0 for first follower, etc.).
+
+    #     Returns:
+    #         torch.Tensor: A tensor of shape [batch_dim, 3] containing the chosen
+    #                       (vx, vy, vyaw) for each environment in the batch.
+    #     """
+    #     self.APF_ATTRACTIVE_GAIN = 5.0              # Scaling factor for pull towards the goal
+    #     self.APF_REPULSIVE_GAIN = 7.6               # Scaling factor for push from obstacles
+    #     self.APF_OBSTACLE_INFLUENCE_RADIUS = 0.6    # Distance (m) at which obstacles start exerting a force
+    #     self.APF_GOAL_TOLERANCE = 0.03              # Distance (m) to the goal to stop linear motion
+        
+    #     # --- Robot Dynamic Constraints (similar to DWA) ---
+    #     self.APF_MAX_SPEED_X = 1.0  # m/s
+    #     self.APF_MAX_SPEED_Y = 0.3  # m/s, lateral velocity
+    #     self.APF_MAX_SPEED_YAW = 1.0 # rad/s
+    #     # --- 0. Get Current State, Goal, and Sensor Data ---
+    #     # Get the local target pose from the high-level policy's output
+    #     # Assuming self.formation_goals is a list where each element is a [batch, 3] tensor
+    #     local_target_pose = self.formation_goals[agent_idx] # Shape: [batch_dim, 3] (x, y, theta)
+        
+    #     # Get LiDAR readings and their corresponding local angles
+    #     # This follows the access pattern from your DWA implementation
+    #     lidar_readings = agent.sensors[0].measure()          # Shape: [batch_dim, num_rays]
+    #     lidar_angles_local = agent.sensors[0]._angles        # Shape: [batch_dim, num_rays]
+    #     # lidar_range_min = agent.sensors[0]._min_range        # float
+
+    #     batch_dim = local_target_pose.shape[0]
+
+    #     # --- 1. Calculate Attractive Force ---
+    #     goal_vec = local_target_pose[:, :2] - agent.state.pos # Shape: [batch_dim, 2]
+    #     goal_dist = torch.norm(goal_vec, dim=1, keepdim=True) # Shape: [batch_dim, 1]
+        
+    #     # Force pulls towards the goal, scaled by gain. It's zero if we are very close.
+    #     attractive_force = torch.where(
+    #         goal_dist > self.APF_GOAL_TOLERANCE,
+    #         self.APF_ATTRACTIVE_GAIN * goal_vec,
+    #         torch.zeros_like(goal_vec)
+    #     )
+
+    #     # --- 2. Calculate Total Repulsive Force ---
+    #     repulsive_force = torch.zeros(batch_dim, 2, device=self.device)
+
+    #     # Create a mask for valid obstacle readings within the influence radius
+    #     mask = (lidar_readings < self.APF_OBSTACLE_INFLUENCE_RADIUS) & (lidar_readings > 0)
+
+    #     # Calculate repulsive magnitude only for relevant rays
+    #     # Magnitude is inversely proportional to distance, creating a strong push for close obstacles.
+    #     dist_inv = 1.0 / (lidar_readings + 1e-6) # Add epsilon to avoid division by zero
+    #     radius_inv = 1.0 / self.APF_OBSTACLE_INFLUENCE_RADIUS
+        
+    #     # This formula creates a strong gradient as dist -> 0
+    #     repulsive_magnitude = self.APF_REPULSIVE_GAIN * (dist_inv - radius_inv) * (dist_inv**2)
+    #     repulsive_magnitude = torch.where(mask, repulsive_magnitude, 0.0)
+
+    #     # Calculate force vectors for all rays (pointing away from the obstacle)
+    #     # Vector from obstacle to robot is (-cos(angle), -sin(angle))
+    #     force_vec_x = -torch.cos(lidar_angles_local + agent.state.rot) * repulsive_magnitude
+    #     force_vec_y = -torch.sin(lidar_angles_local + agent.state.rot) * repulsive_magnitude
+
+    #     # Sum all repulsive forces to get a single resultant repulsive vector per batch instance
+    #     repulsive_force[:, 0] = torch.sum(force_vec_x, dim=1)
+    #     repulsive_force[:, 1] = torch.sum(force_vec_y, dim=1)
+
+    #     # --- 3. Combine Forces and Convert to Velocity Command ---
+    #     resultant_force = attractive_force + repulsive_force # Shape: [batch_dim, 2]
+
+    #     # This vector represents the desired velocity in the robot's local frame (vx, vy)
+    #     desired_vx = resultant_force[:, 0]
+    #     desired_vy = resultant_force[:, 1]
+        
+    #     # Desired angular velocity should turn the robot to face the direction of the resultant force
+    #     angle_to_force_vector = torch.atan2(resultant_force[:, 1], resultant_force[:, 0])
+        
+    #     # We also want to eventually match the goal orientation from the high-level policy
+    #     angle_error_to_goal_rot = self._normalize_angle(local_target_pose[:, 2] - agent.state.rot.squeeze(-1))
+        
+    #     # A weighted average to blend the two angular objectives
+    #     # desired_w = (0.7 * angle_to_force_vector) + (0.3 * angle_error_to_goal_rot)
+    #     desired_w = 1.5 * angle_error_to_goal_rot
+
+    #     # If at goal and no repulsion, stop turning
+    #     at_goal_mask = (goal_dist.squeeze(-1) <= self.APF_GOAL_TOLERANCE)
+    #     no_repulsion_mask = (torch.norm(repulsive_force, dim=1) < 1e-3)
+    #     desired_w = torch.where(at_goal_mask & no_repulsion_mask, 0.0, desired_w)
+        
+    #     # --- 4. Clamp velocities to respect physical limits ---
+    #     # Clamp linear speeds (vx, vy) individually
+    #     final_vx = torch.clamp(desired_vx, -self.APF_MAX_SPEED_X, self.APF_MAX_SPEED_X)
+    #     final_vy = torch.clamp(desired_vy, -self.APF_MAX_SPEED_Y, self.APF_MAX_SPEED_Y)
+        
+    #     # Clamp angular speed
+    #     final_w = torch.clamp(desired_w, -self.APF_MAX_SPEED_YAW, self.APF_MAX_SPEED_YAW)
+
+    #     return torch.stack([final_vx, final_vy, final_w], dim=1)
+
+
+    def get_dwa_velocity(self, agent, agent_idx: int) -> Tensor:
+        """
+        Computes the optimal velocity command (vx, vy, vyaw) for a holonomic agent
+        using the Dynamic Window Approach (DWA).
+
+        Args:
+            agent: The agent object for which to compute the velocity. It must have
+                   state.pos, state.rot, and state.vel attributes. state.vel is
+                   assumed to be [vx, vy, vyaw].
+            agent_idx (int): The index of the follower agent (0 for the first follower, etc.).
+
+        Returns:
+            torch.Tensor: A tensor of shape [batch_dim, 3] containing the chosen
+                          (vx, vy, vyaw) for each environment in the batch.
+        """
+        self.DWA_PREDICT_TIME = 0.5  # seconds, how far in the future to simulate trajectories
+        self.DWA_DT = 0.1            # seconds, time step for simulation
+
+        # Robot dynamic constraints (now including vy)
+        self.DWA_MAX_SPEED_X = 0.5   # m/s
+        self.DWA_MAX_SPEED_Y = 0.3   # m/s, lateral velocity
+        self.DWA_MAX_SPEED_YAW = 1.0 # rad/s
+        self.DWA_MAX_ACCEL_X = 1.0   # m/s^2
+        self.DWA_MAX_ACCEL_Y = 1.0   # m/s^2, lateral acceleration
+        self.DWA_MAX_ACCEL_YAW = 2.5 # rad/s^2
+
+        # Velocity sampling resolution
+        self.DWA_VX_RESOLUTION = 10  # Number of forward velocity samples
+        self.DWA_VY_RESOLUTION = 5  # Number of lateral velocity samples
+        self.DWA_W_RESOLUTION = 20  # Number of angular velocity samples
+        
+        # Objective function weights
+        self.DWA_GOAL_HEADING_WEIGHT = 0.2
+        self.DWA_CLEARANCE_WEIGHT = 0.4
+        self.DWA_VELOCITY_WEIGHT = 0.2
+        self.DWA_LATERAL_VEL_PENALTY_WEIGHT = 0.2 # Penalty for using lateral velocity
+        
+        # Safety parameters
+        self.DWA_ROBOT_RADIUS = 0.2 # meters, for collision checking
+        # --- 0. Get Current State and Goal ---
+        current_pos = agent.state.pos       # Shape: [batch_dim, 2] (x, y)
+        current_rot = agent.state.rot       # Shape: [batch_dim, 1] (yaw)
+        current_vx = agent.state.vel[:, 0]  # Current linear velocity (vx)
+        current_vy = agent.state.vel[:, 1]  # Current lateral velocity (vy)
+        current_w = agent.state.ang_vel[:, 0]   # Current angular velocity (vyaw)
+
+        # Get the global goal for this specific follower agent
+        goal_pos = torch.stack([
+            self.formation_goals[agent_idx][:, 0],
+            self.formation_goals[agent_idx][:, 1]
+        ], dim=1) # Shape: [batch_dim, 2]
+
+        # --- 1. Create the 3D Dynamic Window of Achievable Velocities ---
+        vx_min = torch.clamp(current_vx - self.DWA_MAX_ACCEL_X * self.DWA_DT, 0, self.DWA_MAX_SPEED_X)
+        vx_max = torch.clamp(current_vx + self.DWA_MAX_ACCEL_X * self.DWA_DT, 0, self.DWA_MAX_SPEED_X)
+        vy_min = torch.clamp(current_vy - self.DWA_MAX_ACCEL_Y * self.DWA_DT, -self.DWA_MAX_SPEED_Y, self.DWA_MAX_SPEED_Y)
+        vy_max = torch.clamp(current_vy + self.DWA_MAX_ACCEL_Y * self.DWA_DT, -self.DWA_MAX_SPEED_Y, self.DWA_MAX_SPEED_Y)
+        w_min = torch.clamp(current_w - self.DWA_MAX_ACCEL_YAW * self.DWA_DT, -self.DWA_MAX_SPEED_YAW, self.DWA_MAX_SPEED_YAW)
+        w_max = torch.clamp(current_w + self.DWA_MAX_ACCEL_YAW * self.DWA_DT, -self.DWA_MAX_SPEED_YAW, self.DWA_MAX_SPEED_YAW)
+        
+        # --- 2. Sample Velocities from the 3D Window ---
+        vx_samples = torch.linspace(0, 1, self.DWA_VX_RESOLUTION, device=self.device)
+        vy_samples = torch.linspace(-1, 1, self.DWA_VY_RESOLUTION, device=self.device)
+        w_samples = torch.linspace(-1, 1, self.DWA_W_RESOLUTION, device=self.device)
+        
+        # Scale samples to the dynamic window for each environment
+        vx_samples_scaled = vx_min.view(-1, 1) + (vx_max - vx_min).view(-1, 1) * vx_samples.view(1, -1)
+        vy_samples_scaled = vy_min.view(-1, 1) + (vy_max - vy_min).view(-1, 1) * vy_samples.view(1, -1)
+        w_samples_scaled = w_min.view(-1, 1) + (w_max - w_min).view(-1, 1) * w_samples.view(1, -1)
+
+        # Create a grid of all velocity combinations for each batch instance
+        vx_grid = vx_samples_scaled.view(self.batch_dim, self.DWA_VX_RESOLUTION, 1, 1).expand(-1, -1, self.DWA_VY_RESOLUTION, self.DWA_W_RESOLUTION)
+        vy_grid = vy_samples_scaled.view(self.batch_dim, 1, self.DWA_VY_RESOLUTION, 1).expand(-1, self.DWA_VX_RESOLUTION, -1, self.DWA_W_RESOLUTION)
+        w_grid = w_samples_scaled.view(self.batch_dim, 1, 1, self.DWA_W_RESOLUTION).expand(-1, self.DWA_VX_RESOLUTION, self.DWA_VY_RESOLUTION, -1)
+
+        # Flatten for easier processing
+        num_samples = self.DWA_VX_RESOLUTION * self.DWA_VY_RESOLUTION * self.DWA_W_RESOLUTION
+        vx_flat = vx_grid.reshape(self.batch_dim, num_samples)
+        vy_flat = vy_grid.reshape(self.batch_dim, num_samples)
+        w_flat = w_grid.reshape(self.batch_dim, num_samples)
+
+        # --- 3. Simulate Trajectories (Holonomic Model) ---
+        predict_time = self.DWA_PREDICT_TIME
+        
+        cos_rot = torch.cos(current_rot)
+        sin_rot = torch.sin(current_rot)
+
+        dx_global = (vx_flat * cos_rot - vy_flat * sin_rot) * predict_time
+        dy_global = (vx_flat * sin_rot + vy_flat * cos_rot) * predict_time
+
+        x_global_pred = current_pos[:, 0].unsqueeze(1) + dx_global
+        y_global_pred = current_pos[:, 1].unsqueeze(1) + dy_global
+        theta_global_pred = current_rot + w_flat * predict_time
+        
+        # --- 4. Score Each Simulated Trajectory ---
+        # A. Goal Heading Score
+        goal_vec_x = goal_pos[:, 0].unsqueeze(1) - x_global_pred
+        goal_vec_y = goal_pos[:, 1].unsqueeze(1) - y_global_pred
+        target_heading = torch.atan2(goal_vec_y, goal_vec_x)
+        # target_heading = self.formation_goals[i][:, 2]
+        heading_error = torch.abs(self._normalize_angle(target_heading - theta_global_pred))
+        heading_score = 1.0 - (heading_error / torch.pi)
+
+        # B. Clearance Score
+        traj_endpoint_angle = torch.atan2(dy_global, dx_global) 
+        traj_endpoint_local_angle = self._normalize_angle(traj_endpoint_angle - current_rot.squeeze(-1).unsqueeze(1))
+        
+        lidar_readings = agent.sensors[0].measure() # Shape: [batch_dim, num_rays]
+        lidar_angles = agent.sensors[0]._angles   # Shape: [batch_dim, num_rays] (as per user's Lidar class)
+        
+        # --- FIX: Correct broadcasting for angle difference calculation ---
+        # lidar_angles shape: [batch_dim, num_rays]
+        # traj_endpoint_local_angle shape: [batch_dim, num_samples]
+        # We need to compare every sample with every ray for each batch element.
+        # Unsqueeze to prepare for broadcasting:
+        # lidar_angles -> [batch_dim, 1, num_rays]
+        # traj_endpoint_local_angle -> [batch_dim, num_samples, 1]
+        # The subtraction will broadcast to shape [batch_dim, num_samples, num_rays]
+        angle_diff = torch.abs(self._normalize_angle(lidar_angles.unsqueeze(1) - traj_endpoint_local_angle.unsqueeze(2)))
+        
+        # Find the index of the closest LiDAR ray for each simulated trajectory
+        _, closest_ray_indices = torch.min(angle_diff, dim=2) # Shape: [batch_dim, num_samples]
+        
+        clearance = torch.gather(lidar_readings, 1, closest_ray_indices)
+        clearance_score = torch.clamp(clearance / self.DWA_PREDICT_TIME, 0, 1.0) # Normalize by a reasonable distance
+        is_safe = clearance > self.DWA_ROBOT_RADIUS
+
+        # C. Velocity Score (encourage forward, penalize lateral)
+        forward_vel_score = vx_flat / self.DWA_MAX_SPEED_X
+        lateral_vel_penalty = self.DWA_LATERAL_VEL_PENALTY_WEIGHT * (torch.abs(vy_flat) / self.DWA_MAX_SPEED_Y)
+        velocity_score = forward_vel_score - lateral_vel_penalty
+        
+        # --- 5. Combine Scores and Select Best Velocity ---
+        total_score = (self.DWA_GOAL_HEADING_WEIGHT * heading_score +
+                       self.DWA_CLEARANCE_WEIGHT * clearance_score +
+                       self.DWA_VELOCITY_WEIGHT * velocity_score)
+        
+        safe_scores = torch.where(is_safe, total_score, torch.full_like(total_score, -float('inf')))
+        
+        best_score_indices = torch.argmax(safe_scores, dim=1)
+        
+        best_vx = torch.gather(vx_flat, 1, best_score_indices.unsqueeze(1)).squeeze(1)
+        best_vy = torch.gather(vy_flat, 1, best_score_indices.unsqueeze(1)).squeeze(1)
+        best_w = torch.gather(w_flat, 1, best_score_indices.unsqueeze(1)).squeeze(1)
+        
+        # Return vx, vy, vyaw
+        return torch.stack([best_vx, best_vy, best_w], dim=1)
 
     def process_action(self, agent: Agent):
         self.velocity_limit = 0.8 # Adjusted speed for smoother movement
@@ -3994,12 +4356,20 @@ class Scenario(BaseScenario):
                         elif self.working_mode == "RL":
                             # agent.state.force = 2*(agent.action.u[:, :2] - agent.state.vel[:, :2])
                             # agent.state.torque = agent.action.u[:, 2].unsqueeze(-1) - agent.state.ang_vel[:, :1]
+                            # dwa_vel = self.get_dwa_velocity(agent, i)
+                            apf_vel = self.get_apf_velocity(agent, i, self.last_apf_velocity)
+                            self.last_apf_velocity = copy.deepcopy(apf_vel)
                             agent.set_vel(
-                                    torch.stack([5*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 5*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
+                                   apf_vel[:, :2],
                                 batch_index=None,
                             )
+                            # print("dwa vel:{}".format(apf_vel.shape))
+                        #     agent.set_ang_vel(
+                        #         torch.stack([1.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
+                        # batch_index=None,
+                        #     )       
                             agent.set_ang_vel(
-                                torch.stack([1.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
+                                apf_vel[:, 2].unsqueeze(dim=-1),
                         batch_index=None,
                             )       
                             # agent.set_vel(
@@ -4007,6 +4377,8 @@ class Scenario(BaseScenario):
                                 # batch_index=None,
                             # )
                         elif self.working_mode == "potential_field":
+
+                            
                             agent.set_vel(
                             self.compute_potential_field_velocity(agent, i),
                             batch_index=None,
@@ -4480,7 +4852,7 @@ class Scenario(BaseScenario):
         # Compute the vector pointing from agent to the goal
         move_vector = goal_pos - current_pos
         distance_to_goal = torch.norm(move_vector)
-        print("move_vector:{}".format(move_vector))
+        # print("move_vector:{}".format(move_vector))
         if distance_to_goal > 0:
             move_vector_normalized = move_vector[0] / distance_to_goal
 
@@ -4671,7 +5043,7 @@ class Scenario(BaseScenario):
         self.MAX_OBSTACLE_PENALTY = -10.0
         
         # The distance at which the penalty starts. Should be greater than min_range.
-        self.PENALTY_START_DISTANCE = 1.0 
+        self.PENALTY_START_DISTANCE = 0.7 
         # Ensure agent observation is valid before proceeding
         
 
@@ -5067,21 +5439,39 @@ class Scenario(BaseScenario):
                 pos_i = agent1.state.pos  # [batch_size, 2]
                 pos_j = agent2.state.pos  # [batch_size, 2]
                 rot_i = agent1.state.rot  # [batch_size]
-                
-                
+                # print("rot_i shape:{}".format(rot_i.shape))
+                # print("rot i :{}".format(rot_i))
 
                 # Relative position and distance: [batch_size, 2], [batch_size]
                 rel_pos = pos_j - pos_i  # [batch_size, 2]
                 d_ij = torch.norm(rel_pos, dim=1)  # [batch_size]
-                
+                # print("i:{}, j:{}".format(i, j))
+                # print("pos_j:{}".format(pos_j))
+                # print("pos_i:{}".format(pos_i))
                 # Check if within distance
                 within_distance = d_ij <= self.max_connection_distance  # [batch_size]
                 # print("within_distance shape:{}".format(within_distance.shape))
                 # Compute relative angles: [batch_size]
                 # print("rel_pos shape:{}".format(torch.atan2(rel_pos[:, 1], rel_pos[:, 0]).shape))
                 # print("rot_i shape:{}".format(rot_i.squeeze(dim=1).shape))
-                theta_ij = torch.atan2(rel_pos[:, 1], rel_pos[:, 0]) - rot_i.squeeze(dim=1)  # [batch_size]
-                # Normalize angles to [-pi, pi]
+                # theta_ij = torch.atan2(rel_pos[:, 1], rel_pos[:, 0]) - rot_i.squeeze(dim=1)  # [batch_size]
+                angle_ij_world = torch.atan2(rel_pos[:, 1], rel_pos[:, 0])
+
+                # 2. Explicitly reshape both tensors to be column vectors [20, 1] to ensure
+                #    element-wise subtraction without broadcasting to a 2D matrix.
+                angle_ij_world_col = angle_ij_world.view(-1, 1).squeeze(dim=1) # Shape becomes [20, 1]
+                rot_i_col = copy.deepcopy(rot_i) # Shape is already [20, 1]
+                # print("angle_ij_world_col shape:{}".format(angle_ij_world_col.shape))
+                # print("rot_i_col shape:{}".format(rot_i_col.shape))
+                # 3. Subtract the two identically shaped tensors. Result is [20, 1].
+                theta_ij_col = angle_ij_world_col - rot_i_col.squeeze(dim=1)
+
+                # 4. Squeeze the result back to a 1D tensor of shape [20] for subsequent operations.
+                theta_ij = theta_ij_col.squeeze()
+                
+                
+                # theta_ij = torch.atan2(rel_pos[:, 1], rel_pos[:, 0]) - rot_i.squeeze()
+                # # Normalize angles to [-pi, pi]
                 theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))  # [batch_size]
                 # print("theta_ij shape:{}".format(theta_ij.shape))
                 # Check if within FOV
@@ -5093,6 +5483,7 @@ class Scenario(BaseScenario):
                 # Ensure connection is [batch_size]
                 connection = connection.view(-1)  # [batch_size]
                 # print("connection shape:{}".format(connection.shape))
+                # print("adjacency shape:{}".format(adjacency.shape))
                 # Update adjacency matrices: set to 1 if connected
                 adjacency[:, i, j] = connection.float()
                 adjacency[:, j, i] = connection.float()
@@ -5556,9 +5947,9 @@ class Scenario(BaseScenario):
         )
         left_opening_y = torch.clamp(left_opening_y, 0, max_half_opening_width)
 
-        print("left_opening_y:{}".format(left_opening_y))
+        # print("left_opening_y:{}".format(left_opening_y))
         left_opening_y = left_opening_y - 0.7
-        print("left_opening_y after minus0.7:{}".format(left_opening_y))
+        # print("left_opening_y after minus0.7:{}".format(left_opening_y))
         left_opening_y = torch.where(
              (left_opening_y < 0), # If no valid left obstacle or y became negative
             torch.full_like(left_opening_y, 0.01),
@@ -5658,7 +6049,7 @@ class Scenario(BaseScenario):
                 # self.left_opening, self.right_opening = self.compute_lidar_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 3.5, torch.pi*9.0/10.0)
             # print("lidar_observation_tensor :{}".format(self.current_lidar_reading.shape))
                 self.smoothed_left_opening, self.smoothed_right_opening = self.update_and_get_smoothed_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 3.5, torch.pi*9.0/10.0)
-                print("left open:{}, right open:{}".format(self.smoothed_left_opening, self.smoothed_right_opening))
+                # print("left open:{}, right open:{}".format(self.smoothed_left_opening, self.smoothed_right_opening))
         # Define feature_length:
         # - Node features: max_nodes * num_node_features
         # - Edge indices: max_edges * 2
@@ -5716,7 +6107,7 @@ class Scenario(BaseScenario):
                 relative_poses.append(torch.cat([rotated_pos, rel_theta_normalized.unsqueeze(0)]))
         # print("relative_pos shape:{}".format(torch.stack(relative_poses).shape))
         opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=0)
-        print("opening_tensor shape:{}".format(opening_tensor.shape))
+        # print("opening_tensor shape:{}".format(opening_tensor.shape))
         if self.has_laser == True:
             return {
                 'laser': torch.tensor(lidar_observation_tensor[0]),  # shape [B, 20]
@@ -5799,7 +6190,7 @@ class Scenario(BaseScenario):
         if current_agent_index == 0:
             opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=1)
             opening_list = list(opening_tensor)
-            print("opening_list:{}".format(opening_list))
+            # print("opening_list:{}".format(opening_list))
             return {
                 # "pos_rew": self.pos_rew if self.shared_rew else agent.pos_rew,
                 # "final_rew": self.final_rew,
