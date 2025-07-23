@@ -209,9 +209,9 @@ class VMASWrapper:
             combined_dim = laser_dim + pos_dim + nominal_dim + last_action_dim
 
         else:
-            combined_dim =   pos_dim + nominal_dim
+            combined_dim =   pos_dim + nominal_dim + last_action_dim
         combined_x = combined.reshape(batch_size, n_agents, combined_dim)
-        # print("x:{}".format(combined_x))
+        print("x:{}".format(combined_x))
         # print(f"Final tensor shape: {combined_x.shape}")  # Shape: [batch_num, agent_num, combined_dim]
         # Initialize edge index and edge attributes
         edge_index = []
@@ -263,9 +263,8 @@ class VMASWrapper:
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
             graph_list.append(data)
         # graph_list = Batch.from_data_list(graph_list)
-        # print("graph_list:{}".format(graph_list))
+        print("graph_list:{}".format(graph_list))
         # print("graph_list shape:{}".format(graph_list.shape))
-        # input("1")
         return graph_list
 
     def step(self, actions, done_override=None):
@@ -411,243 +410,428 @@ class GATActor(nn.Module):
         agent_embeddings = x[agent_node_indices]
         return agent_embeddings
 
+class SelfAttentionFusion(nn.Module):
+    """A simple self-attention module to weigh and fuse different feature embeddings."""
+    def __init__(self, input_dim, hidden_dim):
+        super(SelfAttentionFusion, self).__init__()
+        self.query = nn.Linear(input_dim, hidden_dim)
+        self.key = nn.Linear(input_dim, hidden_dim)
+        self.value = nn.Linear(input_dim, input_dim) # Value projects back to original dim
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, *feature_tensors):
+        # feature_tensors is a tuple of embeddings, e.g., (gnn_emb, lidar_emb, last_action_emb)
+        # 1. Stack features to treat them as a sequence for attention
+        # Input shape for each tensor: [N, D_i], where N is total agents in batch
+        # We stack them to be [N, num_features, D_max]
+        combined_features = torch.stack(feature_tensors, dim=1) # Shape: [N, num_features, D_input]
+        
+        # 2. Compute attention scores
+        q = self.query(combined_features)
+        k = self.key(combined_features)
+        scores = torch.bmm(q, k.transpose(1, 2)) # Batch matrix multiply: [N, num_features, num_features]
+        
+        # 3. Apply softmax to get attention weights
+        attention_weights = self.softmax(scores)
+        
+        # 4. Compute weighted sum of value vectors
+        v = self.value(combined_features)
+        attended_features = torch.bmm(attention_weights, v) # [N, num_features, D_input]
+        
+        # 5. Flatten the attended features to get a single fused vector per agent
+        # This combines the weighted information from all sources
+        fused_vector = attended_features.view(attended_features.size(0), -1)
+        return fused_vector
+
+# class GATActorWithLaser(nn.Module):
+#     def __init__(self, in_channels, hidden_channels, action_dim, num_agents, x_limit, y_limit, theta_limit):
+#         super(GATActorWithLaser, self).__init__()
+#         self.num_agents = num_agents
+#         self.lidar_dim = 20
+#         self.last_action_dim = 3
+#         self.non_lidar_feature_dim = in_channels - self.lidar_dim - self.last_action_dim
+
+#         # --- Encoders (same as before) ---
+#         self.lidar_cnn_hidden_channels_c1 = 16
+#         self.lidar_cnn_hidden_channels_c2 = 32
+#         self.lidar_embedding_dim = 16 # Increased embedding dim for more capacity
+#         self.lidar_encoder_cnn = nn.Sequential(
+#             nn.Conv1d(1, self.lidar_cnn_hidden_channels_c1, 5, padding=2), nn.ReLU(), nn.MaxPool1d(2),
+#             nn.Conv1d(self.lidar_cnn_hidden_channels_c1, self.lidar_cnn_hidden_channels_c2, 3, padding=1), nn.ReLU(),
+#             nn.AdaptiveAvgPool1d(1), nn.Flatten(),
+#             nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim), nn.ReLU()
+#         )
+#         self.lidar_decoder_mlp = nn.Sequential(
+#             nn.Linear(self.lidar_embedding_dim, hidden_channels), nn.ReLU(),
+#             nn.Linear(hidden_channels, self.lidar_dim)
+#         )
+        
+#         # GAT layers for relational features
+#         self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+#         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+#         self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+
+#         # self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+#         # self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+#         # self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+#         self.gnn_output_dim = hidden_channels * 8
+
+#         self.pool = global_mean_pool
+
+#         # --- NEW: Attention Fusion Module ---
+#         # The input dimension to the fusion module should be consistent for all features.
+#         # We'll project each feature stream to a common dimension first.
+#         self.fusion_dim = 64
+#         self.gnn_projection = nn.Linear(self.gnn_output_dim * 2, self.fusion_dim) # GNN agent + global
+#         self.lidar_projection = nn.Linear(self.lidar_embedding_dim, self.fusion_dim)
+#         self.action_projection = nn.Linear(self.last_action_dim, self.fusion_dim)
+        
+#         self.attention_fusion = SelfAttentionFusion(input_dim=self.fusion_dim, hidden_dim=32)
+
+#         # Actor MLP head now takes the flattened output of the attention module
+#         # The output size of attention_fusion is num_features * fusion_dim
+#         num_feature_streams = 3 # (GNN, LiDAR, Last Action)
+#         self.fc1 = nn.Sequential(
+#             nn.Linear(num_feature_streams * self.fusion_dim, hidden_channels * 4),
+#             nn.ReLU()
+#         )
+#         self.fc2 = nn.Linear(hidden_channels * 4, action_dim * 2)
+#         limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
+#         self.action_limits = limits_tensor.view(1, action_dim)
+
+#     def forward(self, data):
+#         x_all_features, edge_index, edge_attr, batch_map = data.x, data.edge_index, data.edge_attr, data.batch
+        
+#         # Split features
+#         raw_lidar = x_all_features[:, :self.lidar_dim]
+#         non_lidar_features = x_all_features[:, self.lidar_dim : self.lidar_dim + 6]
+#         last_action = x_all_features[:, self.lidar_dim + 6:]
+
+#         # --- 1. Process each feature stream independently ---
+#         # LiDAR Stream
+#         processed_lidar = self.lidar_encoder_cnn(raw_lidar.unsqueeze(1))
+#         reconstructed_lidar = self.lidar_decoder_mlp(processed_lidar)
+#         agent_lidar_emb = self.extract_agent_embeddings(processed_lidar, batch_map, data.num_graphs)
+
+#         # GNN Stream
+
+#         x = self.conv1(non_lidar_features, edge_index, edge_attr.squeeze(dim=1))
+#         x = torch.relu(x)
+#         x = self.conv2(x, edge_index, edge_attr)
+#         x = torch.relu(x)
+#         x = self.conv3(x, edge_index, edge_attr)
+#         x_gnn = torch.relu(x)
+#         # x_gnn = F.relu(self.conv1(non_lidar_features, edge_index))
+#         # x_gnn = F.relu(self.conv2(x_gnn, edge_index))
+#         agent_gnn_emb = self.extract_agent_embeddings(x_gnn, batch_map, data.num_graphs)
+#         global_gnn_emb = self.pool(x_gnn, batch_map).repeat_interleave(self.num_agents, dim=0)
+#         combined_gnn_emb = torch.cat([agent_gnn_emb, global_gnn_emb], dim=1)
+
+#         # Last Action Stream
+#         agent_action_emb = self.extract_agent_embeddings(last_action, batch_map, data.num_graphs)
+
+#         # --- 2. Project all embeddings to a common dimension for attention ---
+#         gnn_proj = self.gnn_projection(combined_gnn_emb)
+#         lidar_proj = self.lidar_projection(agent_lidar_emb)
+#         action_proj = self.action_projection(agent_action_emb)
+
+#         # --- 3. Fuse with Attention ---
+#         fused_features = self.attention_fusion(gnn_proj, lidar_proj, action_proj)
+
+#         # --- 4. Actor Head ---
+#         actor_hidden = self.fc1(fused_features)
+#         # ... (rest of the forward pass is the same: chunk, tanh, sigmoid, scale, view)
+#         mean_and_std_params = self.fc2(actor_hidden)
+#         action_mean_raw, action_std_raw_params = torch.chunk(mean_and_std_params, 2, dim=-1)
+#         action_mean_tanh = torch.tanh(action_mean_raw)
+#         action_mean_scaled = action_mean_tanh * self.action_limits
+#         min_std_val, max_std_val = 0.01, 0.45
+#         std_output_scaled = torch.sigmoid(action_std_raw_params)
+#         action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val) + 1e-5
+#         action_mean = action_mean_scaled.view(data.num_graphs, self.num_agents, -1)
+#         action_std = action_std_processed.view(data.num_graphs, self.num_agents, -1)
+        
+#         raw_lidar_for_agents = self.extract_agent_embeddings(raw_lidar, batch_map, data.num_graphs)
+#         reconstructed_lidar_for_agents = self.extract_agent_embeddings(reconstructed_lidar, batch_map, data.num_graphs)
+
+#         return action_mean, action_std, raw_lidar_for_agents, reconstructed_lidar_for_agents
+
+
+#     def extract_agent_embeddings(self, x, batch, batch_size):
+#         agent_node_indices = []
+#         for graph_idx in range(batch_size):
+#             node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+#             agent_nodes = node_indices[:self.num_agents]
+#             agent_node_indices.append(agent_nodes)
+
+#         agent_node_indices = torch.cat(agent_node_indices, dim=0)
+#         agent_embeddings = x[agent_node_indices]
+#         return agent_embeddings
+
+
+# class GATCriticWithLaser(nn.Module):
+#     def __init__(self, in_channels, hidden_channels, num_agents):
+#         """
+#         Initializes the Critic model with LiDAR processing capabilities.
+#         Args:
+#             in_channels (int): Total dimension of the raw node features (including LiDAR).
+#             hidden_channels (int): Dimension for hidden layers in GNN and MLPs.
+#             num_agents (int): Number of agents in the simulation.
+#         """
+#         super(GATCriticWithLaser, self).__init__()
+#         self.num_agents = num_agents
+#         self.lidar_dim = 20 # As defined in your actor
+#         self.last_action_dim = 3 # As defined in your actor
+#         self.non_lidar_feature_dim = in_channels - self.lidar_dim - self.last_action_dim
+
+#         # --- Feature Encoders (Mirrors the Actor's Encoders) ---
+
+#         # 1. 1D CNN LiDAR Encoder
+#         lidar_cnn_hidden_channels_c1 = 16
+#         lidar_cnn_hidden_channels_c2 = 32
+#         lidar_embedding_dim = 5 # Should match the actor's embedding dim
+#         self.lidar_encoder_cnn = nn.Sequential(
+#             nn.Conv1d(in_channels=1, out_channels=lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
+#             nn.ReLU(),
+#             nn.MaxPool1d(kernel_size=2, stride=2),
+#             nn.Conv1d(in_channels=lidar_cnn_hidden_channels_c1, out_channels=lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
+#             nn.ReLU(),
+#             nn.AdaptiveAvgPool1d(1),
+#             nn.Flatten(),
+#             nn.Linear(lidar_cnn_hidden_channels_c2, lidar_embedding_dim),
+#             nn.ReLU()
+#         )
+
+#         # 2. GAT Layers for non-LiDAR relational features
+#         self.conv1 = GATConv(self.non_lidar_feature_dim, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+#         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+#         self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+#         self.gnn_output_dim = hidden_channels * 8
+
+#         # 3. Global Pooling Layer
+#         self.pool = global_mean_pool
+
+#         # --- Critic Head (Value Estimation) ---
+#         # Input to the critic head is the concatenation of globally pooled features
+#         # from the GNN, LiDAR encoder, and last actions.
+#         critic_head_input_dim = self.gnn_output_dim + lidar_embedding_dim + self.last_action_dim
+#         self.critic_fc1 = nn.Linear(critic_head_input_dim, hidden_channels * 4)
+#         self.critic_fc2 = nn.Linear(hidden_channels * 4, 1)  # Outputs a single scalar state value
+
+#     def forward(self, data: Batch):
+#         x_all_features, edge_index, edge_attr, batch_map = data.x, data.edge_index, data.edge_attr, data.batch
+
+#         # Split the input features just like in the actor
+#         raw_lidar_scans_all_nodes = x_all_features[:, :self.lidar_dim]
+#         original_node_features = x_all_features[:, self.lidar_dim : self.lidar_dim + 6]
+#         last_action_features = x_all_features[:, self.lidar_dim + 6:]
+
+#         # --- 1. Process LiDAR Features ---
+#         processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
+#         # Globally pool the processed LiDAR features to get a single vector per graph
+#         global_lidar_embedding = self.pool(processed_lidar_features, batch_map)
+
+#         # --- 2. Process Relational Features with GNN ---
+#         x_gnn = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1) if edge_attr is not None and edge_attr.dim() > 1 else edge_attr)
+#         x_gnn = torch.relu(x_gnn)
+#         x_gnn = self.conv2(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
+#         x_gnn = torch.relu(x_gnn)
+#         x_gnn = self.conv3(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
+#         node_gnn_embeddings = torch.relu(x_gnn)
+#         # Globally pool the GNN output features
+#         global_gnn_embedding = self.pool(node_gnn_embeddings, batch_map)
+
+#         # --- 3. Process Last Action Features ---
+#         # Globally pool the last action features to get an average action representation
+#         global_last_action_embedding = self.pool(last_action_features, batch_map)
+        
+#         # --- 4. Fusion and Value Estimation ---
+#         # Concatenate all global embeddings to form a comprehensive state representation
+#         combined_global_features = torch.cat([
+#             global_gnn_embedding, 
+#             global_lidar_embedding, 
+#             global_last_action_embedding
+#         ], dim=1)
+
+#         # Pass through the critic's MLP head to get the state value
+#         critic_hidden = F.relu(self.critic_fc1(combined_global_features))
+#         state_value = self.critic_fc2(critic_hidden)
+        
+#         return state_value
+
 class GATActorWithLaser(nn.Module):
     def __init__(self, in_channels, hidden_channels, action_dim, num_agents, x_limit, y_limit, theta_limit):
         super(GATActorWithLaser, self).__init__()
         self.num_agents = num_agents
-
-
-        self.lidar_cnn_hidden_channels_c1 = 16 # Hidden channels for first CNN layer (e.g., 16)
-        self.lidar_cnn_hidden_channels_c2 = 32 # Hidden channels for second CNN layer (e.g., 32)
-        self.lidar_embedding_dim = 5
         self.lidar_dim = 20
-        self.forward_opening_dim = 2
+        self.last_action_dim = 3
+        # The dimension of features that are NOT LiDAR or last_action
+        # self.non_lidar_feature_dim = in_channels - self.lidar_dim - self.last_action_dim
+
+        # --- 1. LiDAR Encoder (pre-processes LiDAR before GNN) ---
+        self.lidar_cnn_hidden_channels_c1 = 16
+        self.lidar_cnn_hidden_channels_c2 = 32
+        self.lidar_embedding_dim = 16 # A slightly larger embedding can be beneficial
         self.lidar_encoder_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=self.lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2), # Halves sequence length if lidar_dim is even
-            nn.Conv1d(in_channels=self.lidar_cnn_hidden_channels_c1, out_channels=self.lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1), # Reduces sequence length to 1: Output [N, lidar_cnn_hidden_channels_c2, 1]
-            nn.Flatten(),            # Output: [N_total_nodes, lidar_cnn_hidden_channels_c2]
-            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim),
-            nn.ReLU()
+            nn.Conv1d(1, self.lidar_cnn_hidden_channels_c1, 5, padding=2), nn.ReLU(), nn.MaxPool1d(2),
+            nn.Conv1d(self.lidar_cnn_hidden_channels_c1, self.lidar_cnn_hidden_channels_c2, 3, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1), nn.Flatten(),
+            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim), nn.ReLU()
         )
-        # Output of lidar_encoder_cnn: [N_total_nodes, lidar_embedding_dim]
-
-        # 2. LiDAR Decoder (MLP to reconstruct raw LiDAR from embedding)
+        # Autoencoder Decoder for self-supervision
         self.lidar_decoder_mlp = nn.Sequential(
-            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
-            nn.ReLU(),
-            nn.Linear(hidden_channels, self.lidar_dim) # Output raw lidar_dim
-            # No final activation if raw LiDAR values are not bounded like [0,1].
-            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
+            nn.Linear(self.lidar_embedding_dim, hidden_channels), nn.ReLU(),
+            nn.Linear(hidden_channels, self.lidar_dim)
         )
-
-        self.forward_opening_mlp = nn.Sequential(
-            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
-            nn.ReLU(),
-            nn.Linear(hidden_channels, self.forward_opening_dim) # Output raw lidar_dim
-            # No final activation if raw LiDAR values are not bounded like [0,1].
-            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
-        )
-
-        gnn_input_channels = in_channels 
-        # GAT layers
-        self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        
+        # --- 2. GAT Layers (now take fused features as input) ---
+        # The input to the GNN is the original non-lidar features + the processed LiDAR embedding + last action
+        gnn_input_channels = in_channels + self.lidar_embedding_dim + self.last_action_dim
+        self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        # self.gnn_output_dim = hidden_channels * 8
+        self.gnn_output_dim = hidden_channels * 8
 
-        
-
-
-
-        limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
-        self.action_limits = limits_tensor.view(1, action_dim)
-        # self.register_buffer('action_limits', limits_tensor.view(1, self.action_dim))
-        # Global pooling layer
         self.pool = global_mean_pool
 
-        # Actor network (policy head)
+        # --- 3. Actor Head (processes GNN output) ---
+        # Input is now simpler: just the GNN's agent embedding and the global graph embedding
+        actor_head_input_dim = self.gnn_output_dim * 2 # Agent GNN emb + Global GNN emb
         self.fc1 = nn.Sequential(
-            nn.Linear(hidden_channels * 16 + self.lidar_embedding_dim + 3, hidden_channels * 4),
+            nn.Linear(actor_head_input_dim, hidden_channels * 4),
             nn.ReLU()
         )
         self.fc2 = nn.Linear(hidden_channels * 4, action_dim * 2)
-        # self.log_std = nn.Parameter(torch.zeros(1, 1, action_dim))
+
+        # Action limits
+        limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
+        self.register_buffer('action_limits', limits_tensor.view(1, action_dim))
+
     def forward(self, data):
-        x_all_features, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        # print("x_all_features shape:{}".format(x_all_features.shape))
-        # nominal_pos_diff = x[:, 3:]
-
-        original_node_features = x_all_features[:, self.lidar_dim: self.lidar_dim + 6 ] # All columns except the last lidar_dim ones
+        x_all_features, edge_index, edge_attr, batch_map = data.x, data.edge_index, data.edge_attr, data.batch
         
-        raw_lidar_scans_all_nodes = x_all_features[:, :self.lidar_dim]  # The first lidar_dim columns
-        last_action_features = x_all_features[:, self.lidar_dim + 6:]
+        # --- Step A: Split Raw Features ---
+        raw_lidar = x_all_features[:, :self.lidar_dim]
+        non_lidar_features = x_all_features[:, self.lidar_dim : self.lidar_dim + 6]
+        last_action = x_all_features[:, self.lidar_dim + 6:]
 
-        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
-        # print("processed_lidar_features:{}".format(processed_lidar_features))
-        # 2. Decode LiDAR for reconstruction loss (using the same processed features)
-        reconstructed_lidar_all_nodes = self.lidar_decoder_mlp(processed_lidar_features)
+        # --- Step B: Process LiDAR stream to get embedding ---
+        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar.unsqueeze(1))
+        # Also get reconstruction for the auxiliary loss
+        reconstructed_lidar = self.lidar_decoder_mlp(processed_lidar_features)
 
-        # forward_opening = self.forward_opening_mlp(processed_lidar_features)
-        # unique_rows_tensor = forward_opening[::5]
-        # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
-        # x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
+        # --- Step C: Early Fusion ---
+        # Concatenate all node features to create the input for the GNN
+        x_for_gnn = torch.cat([non_lidar_features, processed_lidar_features, last_action], dim=1)
+
+        # --- Step D: Process Fused Features through GNN ---
+        x_gnn = self.conv1(x_for_gnn, edge_index, edge_attr.squeeze(dim=1) if edge_attr is not None and edge_attr.dim() > 1 else edge_attr)
+        x_gnn = F.relu(x_gnn)
+        x_gnn = F.relu(self.conv2(x_gnn, edge_index, edge_attr if edge_attr is not None else None))
+        x_gnn = self.conv3(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
+
+        node_gnn_embeddings = F.relu(x_gnn)
         
-        x = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1))
-        x = torch.relu(x)
-        x = self.conv2(x, edge_index, edge_attr)
-        x = torch.relu(x)
-        x = self.conv3(x, edge_index, edge_attr)
-        x = torch.relu(x)
+        # Global graph embedding from the GNN
+        global_gnn_embedding = self.pool(node_gnn_embeddings, batch_map)
 
-        # Global graph embedding
-        graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels * 8]
-
-        # Extract agent node embeddings
-        agent_embeddings = self.extract_agent_embeddings(x, data.batch, data.num_graphs)
-
-
-        agent_lidar_embeddings = self.extract_agent_embeddings(processed_lidar_features, data.batch, data.num_graphs)
-
-        last_action_embeddings = self.extract_agent_embeddings(last_action_features, data.batch, data.num_graphs)
-        # Repeat graph embedding for each agent
-        graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)
-        # print("agent_embedding shape:{}".format(agent_embeddings.shape))
-        # print("nominal_pos_diff shape:{}".format(nominal_pos_diff.shape))
-        # print("graph embedding shape:{}".format(graph_embedding_repeated.shape))
-        # Concatenate agent embeddings with graph embeddings
-        combined = torch.cat([agent_embeddings, graph_embedding_repeated, agent_lidar_embeddings, last_action_embeddings], dim=1)
-        # print("combined shape:{}".format(combined.shape))
-        # Actor head
-        actor_hidden = self.fc1(combined)
-
+        # --- Step E: Actor Head ---
+        agent_gnn_embeddings = self.extract_agent_embeddings(node_gnn_embeddings, batch_map, data.num_graphs)
+        graph_embedding_repeated = global_gnn_embedding.repeat_interleave(self.num_agents, dim=0)
+        
+        combined_for_actor_head = torch.cat([agent_gnn_embeddings, graph_embedding_repeated], dim=1)
+        
+        actor_hidden = self.fc1(combined_for_actor_head)
         mean_and_std_params = self.fc2(actor_hidden)
         
-        # Split into raw mean and raw std parameters
-        # Each will have shape: [batch_size * num_agents, action_dim]
+        # ... (rest of the action generation logic is the same)
         action_mean_raw, action_std_raw_params = torch.chunk(mean_and_std_params, 2, dim=-1)
-        
-        # Process action_mean_raw: apply tanh and scale by limits
         action_mean_tanh = torch.tanh(action_mean_raw)
-        action_mean_scaled = action_mean_tanh * self.action_limits # self.action_limits is broadcasted
-        
-        min_std_val = 0.01
-        max_std_val = 0.3
-        std_output_scaled = torch.sigmoid(action_std_raw_params) # scales to (0, 1)
-        action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val)
-        action_std_processed = action_std_processed + 1e-5 # Epsilon for stability
-        # Process action_std_raw_params: apply softplus to ensure positivity
-        # action_std_processed = F.softplus(action_std_raw_params)
-        # Optional: Add a small epsilon for numerical stability if std can become too close to zero
-        # action_std_processed = F.softplus(action_std_raw_params) + 1e-6 
-        # --- END MODIFICATION ---
-
-        # Reshape to (num_graphs, num_agents, action_dim)
+        action_mean_scaled = action_mean_tanh * self.action_limits
+        min_std_val, max_std_val = 0.01, 0.45
+        std_output_scaled = torch.sigmoid(action_std_raw_params)
+        action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val) + 1e-5
         action_mean = action_mean_scaled.view(data.num_graphs, self.num_agents, -1)
         action_std = action_std_processed.view(data.num_graphs, self.num_agents, -1)
+        
+        # Get original and reconstructed lidar for agent nodes for the loss function
+        raw_lidar_for_agents = self.extract_agent_embeddings(raw_lidar, batch_map, data.num_graphs)
+        reconstructed_lidar_for_agents = self.extract_agent_embeddings(reconstructed_lidar, batch_map, data.num_graphs)
 
-        return action_mean, action_std, raw_lidar_scans_all_nodes, reconstructed_lidar_all_nodes
+        return action_mean, action_std, raw_lidar_for_agents, reconstructed_lidar_for_agents
 
     def extract_agent_embeddings(self, x, batch, batch_size):
+        # Your existing implementation
         agent_node_indices = []
         for graph_idx in range(batch_size):
             node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
             agent_nodes = node_indices[:self.num_agents]
             agent_node_indices.append(agent_nodes)
-
         agent_node_indices = torch.cat(agent_node_indices, dim=0)
-        agent_embeddings = x[agent_node_indices]
-        return agent_embeddings
+        return x[agent_node_indices]
 
 
 class GATCriticWithLaser(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_agents):
-        """
-        Initializes the Critic model with LiDAR processing capabilities.
-        Args:
-            in_channels (int): Total dimension of the raw node features (including LiDAR).
-            hidden_channels (int): Dimension for hidden layers in GNN and MLPs.
-            num_agents (int): Number of agents in the simulation.
-        """
         super(GATCriticWithLaser, self).__init__()
         self.num_agents = num_agents
-        self.lidar_dim = 20 # As defined in your actor
-        self.last_action_dim = 3 # As defined in your actor
+        self.lidar_dim = 20
+        self.last_action_dim = 3
         self.non_lidar_feature_dim = in_channels - self.lidar_dim - self.last_action_dim
 
-        # --- Feature Encoders (Mirrors the Actor's Encoders) ---
-
-        # 1. 1D CNN LiDAR Encoder
-        lidar_cnn_hidden_channels_c1 = 16
-        lidar_cnn_hidden_channels_c2 = 32
-        lidar_embedding_dim = 5 # Should match the actor's embedding dim
+        # --- 1. LiDAR Encoder (Mirrors the Actor's Encoder) ---
+        self.lidar_cnn_hidden_channels_c1 = 16
+        self.lidar_cnn_hidden_channels_c2 = 32
+        self.lidar_embedding_dim = 16 # Must match actor
         self.lidar_encoder_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
-            nn.Conv1d(in_channels=lidar_cnn_hidden_channels_c1, out_channels=lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(lidar_cnn_hidden_channels_c2, lidar_embedding_dim),
-            nn.ReLU()
+            nn.Conv1d(1, self.lidar_cnn_hidden_channels_c1, 5, padding=2), nn.ReLU(), nn.MaxPool1d(2),
+            nn.Conv1d(self.lidar_cnn_hidden_channels_c1, self.lidar_cnn_hidden_channels_c2, 3, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1), nn.Flatten(),
+            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim), nn.ReLU()
         )
 
-        # 2. GAT Layers for non-LiDAR relational features
-        self.conv1 = GATConv(self.non_lidar_feature_dim, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        # --- 2. GAT Layers (Mirrors the Actor's GNN) ---
+        gnn_input_channels = self.non_lidar_feature_dim + self.lidar_embedding_dim + self.last_action_dim
+        self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.gnn_output_dim = hidden_channels * 8
 
-        # 3. Global Pooling Layer
         self.pool = global_mean_pool
 
-        # --- Critic Head (Value Estimation) ---
-        # Input to the critic head is the concatenation of globally pooled features
-        # from the GNN, LiDAR encoder, and last actions.
-        critic_head_input_dim = self.gnn_output_dim + lidar_embedding_dim + self.last_action_dim
+        # --- 3. Critic Head (Value Estimation) ---
+        # Input is the globally pooled output of the GNN
+        critic_head_input_dim = self.gnn_output_dim
         self.critic_fc1 = nn.Linear(critic_head_input_dim, hidden_channels * 4)
-        self.critic_fc2 = nn.Linear(hidden_channels * 4, 1)  # Outputs a single scalar state value
+        self.critic_fc2 = nn.Linear(hidden_channels * 4, 1)
 
     def forward(self, data: Batch):
         x_all_features, edge_index, edge_attr, batch_map = data.x, data.edge_index, data.edge_attr, data.batch
 
-        # Split the input features just like in the actor
-        raw_lidar_scans_all_nodes = x_all_features[:, :self.lidar_dim]
-        original_node_features = x_all_features[:, self.lidar_dim : self.lidar_dim + self.non_lidar_feature_dim]
-        last_action_features = x_all_features[:, self.lidar_dim + self.non_lidar_feature_dim:]
+        # --- Step A: Split Raw Features ---
+        raw_lidar = x_all_features[:, :self.lidar_dim]
+        non_lidar_features = x_all_features[:, self.lidar_dim : self.lidar_dim + 6]
+        last_action = x_all_features[:, self.lidar_dim + 6:]
 
-        # --- 1. Process LiDAR Features ---
-        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
-        # Globally pool the processed LiDAR features to get a single vector per graph
-        global_lidar_embedding = self.pool(processed_lidar_features, batch_map)
+        # --- Step B: Process LiDAR stream ---
+        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar.unsqueeze(1))
 
-        # --- 2. Process Relational Features with GNN ---
-        x_gnn = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1) if edge_attr is not None and edge_attr.dim() > 1 else edge_attr)
-        x_gnn = torch.relu(x_gnn)
-        x_gnn = self.conv2(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
-        x_gnn = torch.relu(x_gnn)
+        # --- Step C: Early Fusion ---
+        x_for_gnn = torch.cat([non_lidar_features, processed_lidar_features, last_action], dim=1)
+
+        # --- Step D: Process Fused Features through GNN ---
+        x_gnn = self.conv1(x_for_gnn, edge_index, edge_attr.squeeze(dim=1) if edge_attr is not None and edge_attr.dim() > 1 else edge_attr)
+        x_gnn = F.relu(x_gnn)
+        x_gnn = F.relu(self.conv2(x_gnn, edge_index, edge_attr if edge_attr is not None else None))
         x_gnn = self.conv3(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
-        node_gnn_embeddings = torch.relu(x_gnn)
-        # Globally pool the GNN output features
-        global_gnn_embedding = self.pool(node_gnn_embeddings, batch_map)
 
-        # --- 3. Process Last Action Features ---
-        # Globally pool the last action features to get an average action representation
-        global_last_action_embedding = self.pool(last_action_features, batch_map)
+        node_gnn_embeddings = F.relu(x_gnn)
         
-        # --- 4. Fusion and Value Estimation ---
-        # Concatenate all global embeddings to form a comprehensive state representation
-        combined_global_features = torch.cat([
-            global_gnn_embedding, 
-            global_lidar_embedding, 
-            global_last_action_embedding
-        ], dim=1)
-
-        # Pass through the critic's MLP head to get the state value
-        critic_hidden = F.relu(self.critic_fc1(combined_global_features))
+        # --- Step E: Global Pooling and Value Estimation ---
+        global_gnn_embedding = self.pool(node_gnn_embeddings, batch_map)
+        
+        critic_hidden = F.relu(self.critic_fc1(global_gnn_embedding))
         state_value = self.critic_fc2(critic_hidden)
         
         return state_value
@@ -675,12 +859,12 @@ class GATCritic(nn.Module):
         # print("x_all_features shape:{}".format(x_all_features.shape))
         # nominal_pos_diff = x[:, 3:]
 
-        original_node_features = x_all_features[:, self.lidar_dim: self.lidar_dim + 6]
+        # original_node_features = x_all_features[:, self.lidar_dim: self.lidar_dim + 6]
 
         # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
         # x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
         
-        x = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1))
+        x = self.conv1(x_all_features, edge_index, edge_attr.squeeze(dim=1))
         x = torch.relu(x)
         x = self.conv2(x, edge_index, edge_attr)
         x = torch.relu(x)
@@ -780,7 +964,7 @@ def main(args):
     if args.has_laser:
         in_channels = 6  # Adjust based on your observation space
     else:
-        in_channels = 6  # Adjust based on your observation space
+        in_channels = 9  # Adjust based on your observation space
 
     hidden_dim = 64
     action_dim = 3  # Adjust based on your action space
@@ -807,8 +991,11 @@ def main(args):
     else:
         clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
 
-    
-    critic_model = GATCriticWithLaser(in_channels + 20 + 3, hidden_dim, num_agents).to(device)
+    if args.has_laser:
+        critic_model = GATCriticWithLaser(in_channels + 20 + 3, hidden_dim, num_agents).to(device)
+    else:
+        critic_model = GATCritic(in_channels , hidden_dim, num_agents).to(device)
+
 
     if args.policy_filename != "":
         policy_pretrained_weights = torch.load(args.policy_filename, map_location=device)
@@ -894,7 +1081,7 @@ def main(args):
         critic_model.train()
 
         # [num_envs]
-        max_steps_per_episode = 250  # Adjust as needed
+        max_steps_per_episode = 200  # Adjust as needed
         # Initialize storage
         epoch_actions_list = []
         epoch_log_probs_list = []
@@ -928,7 +1115,7 @@ def main(args):
         # obs = env.reset()  # [num_envs, n_agents, obs_dim]
         for epoch_restart_idx in range(epoch_restart_num):
             env = VMASWrapper(
-                scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2",
+                scenario_name=args.scenario_name,
                 num_envs=train_num_envs,
                 device=device,
                 continuous_actions=True,
@@ -942,7 +1129,6 @@ def main(args):
 
             )
             obs_list_of_data = env.get_obs()
-
             restart_actions = []
             restart_log_probs = []
             restart_values = []
@@ -961,7 +1147,7 @@ def main(args):
                 print("step:{}".format(step_idx))
                 # Prepare observations for GNN
 
-
+                print("obs_list_of_data:{}".format(obs_list_of_data))
                 batched_obs_for_gnn = Batch.from_data_list(obs_list_of_data).to(device)
                 # Forward pass through the policy
                 with torch.no_grad():
@@ -987,7 +1173,7 @@ def main(args):
                     action_sampled_per_env = dist.sample() # [train_num_envs, num_agents, action_dim]
                     log_prob_per_env = dist.log_prob(action_sampled_per_env).sum(dim=-1) # [train_num_envs, num_agents]
                     # print("action_sample:{}".format(action_sampled_per_env))
-                    # print("batch_obs:{}".format(batch_obs))
+                    print("batch_obs:{}".format(batched_obs_for_gnn))
                     # action_mean, state_value = model(batch_obs)
                     # action_mean = actor_model(batch_obs)
                     state_value_per_env = critic_model(batched_obs_for_gnn).squeeze(-1) # [train_num_envs]
@@ -1253,7 +1439,7 @@ def main(args):
                 forward_opening_tensor = torch.stack(forward_opening_list_mb, dim=0)
 
                 # Actor update
-                reconstruction_loss_coef = 0.01 
+                reconstruction_loss_coef = 0.0
 
                 actor_optimizer.zero_grad()
 
@@ -1309,20 +1495,20 @@ def main(args):
         
         
         from vmas.simulator.utils import save_video
-        if (epoch) % 5 == 0: # Evaluate every 10 epochs
+        if (epoch) % 20 == 0: # Evaluate every 10 epochs
             clutter_actor_model.eval()
             critic_model.eval()
             eval_rewards_all_episodes = []
             eval_epoch_restart_num = 2 # Number of different evaluation scenarios
             eval_num_envs = 1 # Evaluate one environment at a time for clear video/metrics
-            eval_steps_per_episode = 700
+            eval_steps_per_episode = 200
 
             # For simplicity, collision/connection metrics are not re-implemented here
             # but would follow a similar pattern to the training loop's info handling if needed.
             print("eval :train_map_directory:{}".format(train_map_directory))
             for eval_idx in range(eval_epoch_restart_num):
                 eval_env = VMASWrapper(
-                    scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2", # Or a specific eval scenario
+                    scenario_name=args.scenario_name, # Or a specific eval scenario
                     num_envs=eval_num_envs,
                     device=device,
                     continuous_actions=True,
@@ -1396,7 +1582,7 @@ def main(args):
             swanlab.log({'Evaluation/train_map_level': train_map_level}, step=epoch)
             
 
-            if len(curriculum_transition_return) == 5:
+            if len(curriculum_transition_return) == 3:
                 print("curriculum_transition_return:{}".format(curriculum_transition_return))
                 curriculum_transition_return_mean = np.mean(curriculum_transition_return)
                 print("curriculum transition return mean:{}".format(curriculum_transition_return_mean))
@@ -1417,16 +1603,16 @@ def main(args):
             if train_env_type == "bitmap_tunnel":
                 if curriculum_transition_return_mean > -200000.0 and train_map_directory == "train_tunnel_maps_0":
                     train_map_directory = "train_tunnel_maps_1"
-                elif curriculum_transition_return_mean > 20000.0 and train_map_directory == "train_tunnel_maps_1":
+                elif curriculum_transition_return_mean > 5000.0 and train_map_directory == "train_tunnel_maps_1":
                     train_map_directory = "train_tunnel_maps_2"
             elif train_env_type == "bitmap":
                 print("change map :{}".format(curriculum_transition_return_mean))
-                if curriculum_transition_return_mean > 13000.0 and train_map_directory == "train_maps_0_clutter":
+                if curriculum_transition_return_mean > 5000.0 and train_map_directory == "train_maps_0_clutter":
                     train_map_directory = "train_maps_1_clutter"
                     print("change map to train_maos_1_clutter")
-                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_1_clutter":
+                elif curriculum_transition_return_mean > 5000.0 and train_map_directory == "train_maps_1_clutter":
                     train_map_directory = "train_maps_2_clutter"
-                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_2_clutter":
+                elif curriculum_transition_return_mean > 5000.0 and train_map_directory == "train_maps_2_clutter":
                     train_map_directory = "train_maps_3_clutter"
                 # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_3_clutter":
                 #     train_map_directory = "train_maps_4_clutter"   
@@ -1449,6 +1635,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PPO Training Script with GNN for VMAS")
 
     # Environment and Paths
+    parser.add_argument("--scenario_name", type=str, default="ppo_experiment", help="Unique name for the experiment run")
     parser.add_argument("--experiment_name", type=str, default="ppo_experiment", help="Unique name for the experiment run")
     parser.add_argument("--train_env_type", type=str, required=True, help="Type of training environment (e.g., clutter, door_and_narrow, tunnel, bitmap)")
     parser.add_argument("--policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
