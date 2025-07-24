@@ -16,9 +16,9 @@ experiment_configurations = [
         # "critic_filename": "ppo_bitmap_clutter_critic.pth", 
         "policy_filename": "", # Optional: if you have one
         "critic_filename": "", 
-        "output_policy_filename": "ppo_bitmap_clutter_200_3.pth",
-        "output_critic_filename": "ppo_bitmap_clutter_critic_200_3.pth",
-        "steps_per_epoch": 200,
+        "output_policy_filename": "ppo_bitmap_clutter_100_random_start.pth",
+        "output_critic_filename": "ppo_bitmap_clutter_critic_100_random_start.pth",
+        "steps_per_epoch": 100,
         "epochs": 50000, # Shorter for example
         "device": "cpu", # Assign specific GPU if available
         "learning_rate": 3e-4,
@@ -28,7 +28,7 @@ experiment_configurations = [
         "num_envs": 20,
         "seed": 0,
         "has_laser": True,
-        "train_map_directory": "train_maps_0_test",
+        "train_map_directory": "train_maps_2_clutter",
         "use_leader_laser_only": False,
     },
     # {5_rwc-0.8_seed1",

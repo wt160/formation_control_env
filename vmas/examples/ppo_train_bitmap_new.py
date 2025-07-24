@@ -1081,7 +1081,7 @@ def main(args):
         critic_model.train()
 
         # [num_envs]
-        max_steps_per_episode = 200  # Adjust as needed
+        max_steps_per_episode = 100  # Adjust as needed
         # Initialize storage
         epoch_actions_list = []
         epoch_log_probs_list = []
@@ -1501,7 +1501,7 @@ def main(args):
             eval_rewards_all_episodes = []
             eval_epoch_restart_num = 2 # Number of different evaluation scenarios
             eval_num_envs = 1 # Evaluate one environment at a time for clear video/metrics
-            eval_steps_per_episode = 200
+            eval_steps_per_episode = 100
 
             # For simplicity, collision/connection metrics are not re-implemented here
             # but would follow a similar pattern to the training loop's info handling if needed.

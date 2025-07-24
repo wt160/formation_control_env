@@ -356,6 +356,8 @@ class Scenario(BaseScenario):
         elif self.env_type == "bitmap_tunnel":
             train_maps_path = os.path.join(script_dir, "..", self.train_map_directory)
 
+        self.origin = [-12.8, -12.8]
+        self.scale = 0.1
         # self.create_obstacles(self.obstacle_pattern, world)
         self.bitmap = self.create_bitmap_obstacle(train_maps_path, world, batch_dim)
         # print("bitmap:{}".format(self.bitmap.shape))
@@ -525,8 +527,7 @@ class Scenario(BaseScenario):
         #number of agents that are connected to leader
         self.eva_connection_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
         # self.precompute_evaluation_scene(self.env_type)
-
-
+        
         return world
 
     def load_map(self, file_path: str, obstacle_threshold: int = 128) -> torch.Tensor:
@@ -626,14 +627,15 @@ class Scenario(BaseScenario):
             bitmap_tensor = bitmap_tensor[:world.batch_dim]
         # print("bitmap_tensor shape:{}".format(bitmap_tensor.shape))
         # Create a single bitmap obstacle with the batched tensor
-        origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+        # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+        # origin = [-12.8, -12.8]
         resolution = 0.1       # Example resolution (meters per pixel)
         
         bitmap_obstacle = BitmapObstacle(
             name="map",
             bitmap=bitmap_tensor,
             resolution=resolution,
-            origin=origin
+            origin=self.origin
         )
         world.add_landmark(bitmap_obstacle)
         
@@ -2820,6 +2822,80 @@ class Scenario(BaseScenario):
                 print(f"Data saved to {file_name}")
 
 
+    def reset_world_at_with_init_pose(self, env_index, init_x, init_y, init_direction):
+        """
+        Reset the world state for a specific environment index with a specified initial direction.
+        
+        Args:
+            env_index (int): The index of the environment to reset
+            init_direction (float or torch.Tensor): The initial heading direction in radians
+        """
+        # Ensure the direction is a tensor with the proper device
+        if not torch.is_tensor(init_direction):
+            init_direction = torch.tensor(init_direction, device=self.device)
+        
+        # Reset timestep counter for this environment
+        if hasattr(self, 't'):
+            self.t = 0
+        
+        # Position the leader agent at the origin
+        self.leader_agent.set_pos(
+            torch.tensor([init_x, init_y], device=self.device),
+            batch_index=env_index,
+        )
+        
+        # Set the formation center to match the leader's position
+        self.formation_center.set_pos(
+            torch.tensor([init_x, init_y], device=self.device),
+            batch_index=env_index,
+        )
+        
+        # Set the formation center position record
+        self.formation_center_pos[env_index, 0] = init_x
+        self.formation_center_pos[env_index, 1] = init_y
+        
+        # Set the leader's rotation to the initial direction
+        self.leader_agent.set_rot(init_direction, batch_index=env_index)
+        self.formation_center.set_rot(init_direction, batch_index=env_index)
+        self.formation_center_pos[env_index, 2] = init_direction
+
+        nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+        nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+        # Reset follower agents to their initial positions in the formation
+        # These positions need to be rotated according to the leader's new orientation
+        for i, agent in enumerate(self.world.agents):
+            if i == 0:  # Skip the leader agent (already set)
+                continue
+                
+            # Get the nominal formation position for this agent (relative to leader)
+            nominal_x = nominal_positions_x[i]
+            nominal_y = nominal_positions_y[i]
+            
+            # Rotate the nominal position by init_direction
+            cos_rot = torch.cos(init_direction)
+            sin_rot = torch.sin(init_direction)
+            rotated_x = nominal_x * cos_rot - nominal_y * sin_rot + init_x
+            rotated_y = nominal_x * sin_rot + nominal_y * cos_rot + init_y
+            
+            # Set the agent's position (leader at origin + rotated offset)
+            agent.set_pos(
+                torch.tensor([rotated_x, rotated_y], device=self.device),
+                batch_index=env_index,
+            )
+            
+            # Set the agent's rotation to match the leader's rotation
+            agent.set_rot(init_direction, batch_index=env_index)
+            
+            # Initialize velocity and angular velocity to zero
+            agent.set_vel(
+                torch.tensor([0.0, 0.0], device=self.device),
+                batch_index=env_index,
+            )
+            agent.set_ang_vel(
+                torch.tensor(0, device=self.device),
+                batch_index=env_index,
+            )
+
     def reset_world_at_with_init_direction(self, env_index, init_direction):
         """
         Reset the world state for a specific environment index with a specified initial direction.
@@ -3324,8 +3400,9 @@ class Scenario(BaseScenario):
             # print("compute path {}".format(dim))
             # print("get_leader path dim:{}".format(dim))
             bitmap = self.bitmap.bitmap[dim, :]
-            origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
-            scale = 0.1
+            # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+            # origin = [-12.8, -12.8]
+            # scale = 0.1
             # Convert bitmap to numpy if it's a torch tensor
             if isinstance(bitmap, torch.Tensor):
                 bitmap = bitmap.cpu().numpy()
@@ -3342,12 +3419,12 @@ class Scenario(BaseScenario):
             bitmap_height, bitmap_width = bitmap.shape
             
             # Convert world position to bitmap coordinates
-            start_x = int((start_pos[0] - origin[0]) / scale)
-            start_y = int((start_pos[1] - origin[1]) / scale)
+            start_x = int((start_pos[0] - self.origin[0]) / self.scale)
+            start_y = int((start_pos[1] - self.origin[1]) / self.scale)
             start_coord = (start_y, start_x)
             
             # Make sure start position is valid
-            if not self._is_valid_point(start_coord, bitmap) or not self._is_safe_point(start_coord, bitmap, agent_radius / scale):
+            if not self._is_valid_point(start_coord, bitmap) or not self._is_safe_point(start_coord, bitmap, agent_radius / self.scale):
             
                 # print("Leader's starting position is invalid or too close to obstacles")
                 # input("Leader's starting position is invalid or too close to obstacles")
@@ -3408,10 +3485,10 @@ class Scenario(BaseScenario):
                         target_y = int(bitmap_height / 2.0)
                         
                     else:
-                        target_x = random.randint(bitmap_width-2, bitmap_width - 1)
-                        target_y = random.randint(bitmap_width//2 - 10, bitmap_height//2 +  10)
-                        # target_x = random.randint(0, bitmap_width - 1)
-                        # target_y = random.randint(0, bitmap_height - 1)
+                        # target_x = random.randint(bitmap_width-2, bitmap_width - 1)
+                        # target_y = random.randint(bitmap_width//2 - 10, bitmap_height//2 +  10)
+                        target_x = random.randint(0, bitmap_width - 1)
+                        target_y = random.randint(0, bitmap_height - 1)
 
                     # if target_x > int(bitmap_width / 3.0) and target_x < int(bitmap_width / 3.0 * 2.0) and target_y > int(bitmap_height / 3.0) and target_y < int(bitmap_height / 3.0 * 2.0):
                     #     continue
@@ -3432,7 +3509,7 @@ class Scenario(BaseScenario):
                     # Ensure target point is valid and safe
 
 
-                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / scale + inflation_radius):
+                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / self.scale + inflation_radius):
                         target_found = True
                         break
                         
@@ -3444,7 +3521,7 @@ class Scenario(BaseScenario):
                 
                 # print("safe buffer:{}".format(agent_radius / scale))
                 # Find path using A* algorithm with safety buffer for agent radius
-                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / scale + inflation_radius))
+                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / self.scale + inflation_radius))
                 
                 # If path found, simplify it and convert back to world coordinates
                 if path:
@@ -3457,11 +3534,11 @@ class Scenario(BaseScenario):
                     path_idx = 0
                     for y, x in path:
                         if path_idx > 10:
-                            world_x = x * scale + origin[0] - 0.03 +  random.random()*0.06
-                            world_y = y * scale + origin[1] - 0.03 +  random.random()*0.06
+                            world_x = x * self.scale + self.origin[0] - 0.03 +  random.random()*0.06
+                            world_y = y * self.scale + self.origin[1] - 0.03 +  random.random()*0.06
                         else:
-                            world_x = x * scale + origin[0] 
-                            world_y = y * scale + origin[1] 
+                            world_x = x * self.scale + self.origin[0] 
+                            world_y = y * self.scale + self.origin[1] 
                         world_path.append(torch.tensor([world_x, world_y], device=self.leader_agent.state.pos.device))
                         path_idx += 1
                     # print("world_path:{}".format(world_path))
@@ -3486,11 +3563,88 @@ class Scenario(BaseScenario):
         for dim in range(self.batch_dim):
             # print("dim:{}".format(dim))
             init_direction = self.compute_leader_init_direction(self.batch_leader_paths[dim])
+            # start_index, init_x, init_y, init_direction = self.find_random_leader_starting_point(dim, self.batch_leader_paths[dim])
             self.reset_world_at_with_init_direction(dim, init_direction)
-        
-
+            # self.reset_world_at_with_init_pose(dim, init_x, init_y, init_direction)
+            # self.batch_leader_paths[dim] = self.batch_leader_paths[dim][start_index:]
         return self.batch_leader_paths
     
+
+
+    def find_random_leader_starting_point(self, dim, world_path):
+        default_angle = torch.tensor(0.0, device=self.device)
+
+        if not world_path or len(world_path) < 2:
+            return 0, 0, 0, default_angle
+        
+        path_length = len(world_path)
+        num_trials = 1000
+        trial_index = 0
+        check_start_index = 0
+        while trial_index < num_trials:
+            if path_length > 60:
+                check_start_index = np.random.randint(1, path_length - 30)
+            else:
+                check_start_index = 0
+            is_free, init_x, init_y, init_direction = self.check_formation_free(dim, world_path, check_start_index)
+            if is_free:
+                return check_start_index, init_x, init_y, init_direction
+
+            trial_index += 1
+
+        init_direction = self.compute_leader_init_direction(world_path)
+        return 0, 0, 0, init_direction
+
+    def check_formation_free(self, dim, world_path, check_start_index):
+        first_waypoint = world_path[check_start_index]
+        second_waypoint = world_path[check_start_index + 1]
+        bitmap = self.bitmap.bitmap[dim, :]
+        # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+        # origin = [-12.8, -12.8]
+        # scale = 0.1
+        # Convert bitmap to numpy if it's a torch tensor
+        if isinstance(bitmap, torch.Tensor):
+            bitmap = bitmap.cpu().numpy()
+        # Calculate the vector from first to second waypoint
+        dx = second_waypoint[0] - first_waypoint[0]
+        dy = second_waypoint[1] - first_waypoint[1]
+        
+        init_x = first_waypoint[0]
+        init_y = first_waypoint[1]
+        # Calculate the angle in world frame (atan2 gives angle in range [-π, π])
+        # Use torch.atan2 to maintain compatibility with tensors
+        if torch.is_tensor(dx) and torch.is_tensor(dy):
+            angle = torch.atan2(dy, dx)
+        else:
+            angle = torch.tensor(math.atan2(dy, dx), device=self.device)
+        
+        init_direction = angle
+        nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+        nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+        # Reset follower agents to their initial positions in the formation
+        # These positions need to be rotated according to the leader's new orientation
+        for i, agent in enumerate(self.world.agents):
+            if i == 0:  # Skip the leader agent (already set)
+                continue
+                
+            # Get the nominal formation position for this agent (relative to leader)
+            nominal_x = nominal_positions_x[i]
+            nominal_y = nominal_positions_y[i]
+            
+            # Rotate the nominal position by init_direction
+            cos_rot = torch.cos(init_direction)
+            sin_rot = torch.sin(init_direction)
+            rotated_x = nominal_x * cos_rot - nominal_y * sin_rot + init_x
+            rotated_y = nominal_x * sin_rot + nominal_y * cos_rot + init_y
+            transform_agent_x = int((rotated_x - self.origin[0]) / self.scale)
+            transform_agent_y = int((rotated_y - self.origin[1]) / self.scale)
+            transform_agent_coord = (transform_agent_y, transform_agent_x)
+            
+            # Make sure start position is valid
+            if not self._is_valid_point(transform_agent_coord, bitmap) or not self._is_safe_point(transform_agent_coord, bitmap, self.agent_radius / self.scale):
+                return False, None, None, None
+
+        return True,  init_x, init_y, init_direction
 
     def compute_leader_init_direction(self, world_path):
         """
