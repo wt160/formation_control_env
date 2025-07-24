@@ -20,7 +20,7 @@ class AdvancedMapGenerator:
 
         self.clutter_config = {
             'node_variety': [(5, 0.2), (6, 0.3), (7, 0.4), (8, 0.3), (9, 0.4), (10, 0.1)],  # (节点数, 凹度概率)
-            'size_range': (10, 20),  # 像素单位
+            'size_range': (10, 15),  # 像素单位
             'density_curve': lambda x: 1/(1+np.exp(-0.03*(x-50)))  # 大小分布曲线
 
 
@@ -89,10 +89,11 @@ class AdvancedMapGenerator:
             base = self.create_empty_layer(base)
             # Tunnel maps have a predefined structure and don't need the standard
             # connectivity optimization, which would create shortcuts through walls.
+        elif type == "test":
+            base = self.create_test_layer(base)
 
 
-
-        base = self.add_central_clear_area(base)
+        # base = self.add_central_clear_area(base)
         print("morphological enhance")
         # 阶段2：形态学细节增强
         # base = self.morphological_detail(base)
@@ -146,6 +147,24 @@ class AdvancedMapGenerator:
         base.fill(255) 
         return base
 
+    def create_test_layer(self, base):
+        base.fill(255)  # Start with a completely white (free space) map
+
+        initial = (self.size*0.7, self.size*0.5)
+        nodes, concave_prob = self.clutter_config['node_variety'][
+                np.random.choice(len(self.clutter_config['node_variety']), 
+                               p=[0.2, 0.2, 0.1, 0.1, 0.2, 0.2])]
+            
+        # 生成随机尺寸（带密度控制）
+        size = self.sample_clutter_size()
+            
+            # 生成多边形顶点
+        poly = self.generate_convex_poly(initial, nodes, size)
+            
+        cv2.fillPoly(base, [poly], 0)
+        base = self.add_central_half_clear_area(base)
+        return base
+    
     def create_tunnel_layer(self, base):
         """
         Creates a map with several arc-tube obstacles surrounding a central area,
@@ -553,6 +572,20 @@ class AdvancedMapGenerator:
                      (x_end, y_end),
                      255, -1)  # 白色填充
         return base
+    
+    def add_central_half_clear_area(self, base):
+        """添加中央方形空地"""
+        x_start = (self.size - self.central_clear_size) // 2
+        y_start = (self.size - self.central_clear_size) // 2
+        x_end = x_start + self.central_clear_size // 2
+        y_end = y_start + self.central_clear_size
+        
+        cv2.rectangle(base, 
+                     (x_start, y_start),
+                     (x_end, y_end),
+                     255, -1)  # 白色填充
+        return base
+
     def _validate_concave_shape(self, poly):
         """形状有效性验证"""
         from shapely.geometry import Polygon
@@ -739,210 +772,8 @@ class ConnectivityOptimizer:
         return (M['m10']/(M['m00']+1e-5), M['m01']/(M['m00']+1e-5))
     
 
-class PathGenerator:
-    def __init__(self, bitmap, agent_radius):
-        self.bitmap = bitmap
-        self.agent_radius = agent_radius
-       
 
-
-    def _is_valid_point(self, coord, bitmap):
-        """Check if point is valid (in bounds and not on obstacle)"""
-        y, x = coord
-        # print("valid point check:y:{}, x:{}, value:{}".format(y, x, bitmap[y,x]))
-        if 0 <= y < bitmap.shape[0] and 0 <= x < bitmap.shape[1]:
-            # print("valid point check:y:{}, x:{}, value:{}".format(y, x, bitmap[y,x]))
-            # print("bitmap[y, x] == 255: {}".format(bitmap[y, x] == 255))
-            return bitmap[y, x] == 255  # 1 means no obstacle
-        return False
-
-    def _is_safe_point(self, coord, bitmap, safety_radius):
-        """Check if point is far enough from obstacles"""
-        import numpy as np
-        
-        y, x = coord
-        radius_int = int(np.ceil(safety_radius))
-        # Check all points within safety_radius
-        for dy in range(-radius_int, radius_int + 1):
-            for dx in range(-radius_int, radius_int + 1):
-                # Skip if outside the distance threshold
-                if dx**2 + dy**2 > safety_radius**2:
-                    continue
-                    
-                check_y, check_x = y + dy, x + dx
-                # print("value:{}".format(bitmap[check_y, check_x]))
-                if 0 <= check_y < bitmap.shape[0] and 0 <= check_x < bitmap.shape[1]:
-                    if bitmap[check_y, check_x] == 0:  # Found obstacle within radius
-                        return False
-        
-        return True
-
-    def _find_path_a_star(self, start, goal, bitmap, safety_radius=0):
-        """A* pathfinding algorithm to find path from start to goal, avoiding obstacles by safety_radius"""
-        import heapq
-        import numpy as np
-        
-        def heuristic(a, b):
-            # Euclidean distance
-            return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
-        
-        # Define possible movements (8 directions)
-        neighbors = [(0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]
-        
-        # The set of visited nodes that need not be expanded
-        closed_set = set()
-        
-        # The set of tentative nodes to be evaluated
-        open_set = []
-        heapq.heappush(open_set, (0, start))
-        open_set_dict = {start: 0}  # For quick look-up
-        
-        # Dictionary to track most efficient previous step
-        came_from = {}
-        
-        # Cost from start along best known path
-        g_score = {start: 0}
-        
-        # Estimated total cost from start to goal through y
-        f_score = {start: heuristic(start, goal)}
-        
-        while open_set:
-            _, current = heapq.heappop(open_set)
-            
-            if current == goal:
-                # Reconstruct path
-                path = []
-                while current in came_from:
-                    path.append(current)
-                    current = came_from[current]
-                path.append(start)
-                path.reverse()
-                return path
-            
-            closed_set.add(current)
-            
-            for dy, dx in neighbors:
-                neighbor = (current[0] + dy, current[1] + dx)
-                
-                if neighbor in closed_set:
-                    continue
-
-                    
-                if not self._is_valid_point(neighbor, bitmap) or not self._is_safe_point(neighbor, bitmap, safety_radius):
-                    continue
-                    
-                # Distance between current and neighbor (use Euclidean distance)
-                movement_cost = np.sqrt(dx*dx + dy*dy)
-                tentative_g_score = g_score[current] + movement_cost
-                
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score_value = g_score[neighbor] + heuristic(neighbor, goal)
-                    f_score[neighbor] = f_score_value
-                    
-                    # Add to open set if not already there
-                    if neighbor not in open_set_dict or open_set_dict[neighbor] > f_score_value:
-                        heapq.heappush(open_set, (f_score_value, neighbor))
-                        open_set_dict[neighbor] = f_score_value
-                        
-        # No path found
-        return []
-
-    def get_leader_paths(self, max_trials=1000):
-        """
-        Find a path for the leader agent to a randomly selected target point in the bitmap.
-        
-        Args:
-            leader_agent: The leader agent entity
-            bitmap: The bitmap representing the environment (1 for obstacles, 0 for free space)
-            origin: The (x,y) world coordinates corresponding to bitmap[0,0]
-            scale: The size of each bitmap cell in world units
-            max_trials: Maximum number of attempts to find a valid path
-            
-        Returns:
-            list: A list of waypoints forming a path, or empty list if no path found
-        """
-        import numpy as np
-        import random
-        import torch
-        
-        # print("compute path {}".format(dim))
-        
-        origin = [-12.8, -12.8]  # Example origin coordinates (bottom-left corner)
-        scale = 0.1
-        # Convert bitmap to numpy if it's a torch tensor
-        
-        # print("bitmap shape:{}".format(bitmap.shape))
-        # input("get_paths")
-        # Get initial position of the leader agent (from the first batch)
-        # start_pos = self.leader_agent.state.pos[dim].cpu().numpy()
-        start_pos = [0.0, 0.0]
-        # print("start_pos shape:{}".format(start_pos.shape))
-        # print("start_pos:{}".format(start_pos))
-        # Convert to bitmap coordinates
-        bitmap_height, bitmap_width = self.bitmap.shape
-        # Convert world position to bitmap coordinates
-        start_x = int((start_pos[0] - origin[0]) / scale)
-        start_y = int((start_pos[1] - origin[1]) / scale)
-        start_coord = (start_y, start_x)
-        # Make sure start position is valid
-        # if not self._is_valid_point(start_coord, self.bitmap) or not self._is_safe_point(start_coord, self.bitmap, self.agent_radius / scale):
-        if not self._is_valid_point(start_coord, self.bitmap) or not self._is_safe_point(start_coord, self.bitmap, 1):
-            # input("Leader's starting position is invalid or too close to obstacles")
-            return []
-        
-        # Try finding a path for max_trials attempts
-        for trial in range(max_trials):
-            # Randomly pick a target point
-            target_found = False
-            for _ in range(1000):  # Try 100 random points before giving up on this trial
-                if random.random() < 0.5:
-                    target_x = random.randint(0, bitmap_width / 4.0)
-                else:
-                    target_x = random.randint(bitmap_width / 4.0*3, bitmap_width - 1)
-                
-                if random.random() < 0.5:
-                    target_y = random.randint(0, bitmap_width / 4.0)
-                else:
-                    target_y = random.randint(bitmap_width / 4.0*3, bitmap_width - 1)
-
-                # target_x = random.randint(0, bitmap_width - 1)
-                # target_y = random.randint(0, bitmap_height - 1)
-                target_coord = (target_y, target_x)
-                
-                # Ensure target point is valid and safe
-                if self._is_valid_point(target_coord, self.bitmap) and self._is_safe_point(target_coord, self.bitmap, self.agent_radius / scale):
-                    target_found = True
-                    break
-                    
-            if not target_found:
-                # No valid target found in 100 attempts, try next trial
-                continue
-            # Find path using A* algorithm with safety buffer for agent radius
-            path = self._find_path_a_star(start_coord, target_coord, self.bitmap, safety_radius=(self.agent_radius / scale + 2.0))
-            
-            # If path found, simplify it and convert back to world coordinates
-            if path:
-                # Simplify path (remove unnecessary waypoints)
-                # simplified_path = self._simplify_path(path, self.bitmap, self.agent_radius / scale)
-                
-                # Convert to world coordinates
-                world_path = []
-                for y, x in path:
-                    world_x = x * scale + origin[0]
-                    world_y = y * scale + origin[1]
-                    world_path.append(torch.tensor([world_x, world_y], device="cpu"))
-                # print("world_path:{}".format(world_path))
-                # input("got path for dim {}".format(dim))
-                return world_path
-
-                
-        
-       
-        
-        print("failed!!!!!!!!!!!!!!!!")
-        return []
+    
 
 
 def main():
@@ -951,7 +782,7 @@ def main():
     parser.add_argument('--num', type=int, default=5, 
                       help='生成地图数量，默认5')
     parser.add_argument('--size', type=int, default=256,
-                      choices=[256, 512, 768, 1024, 2048],
+                      choices=[128, 256, 512, 768, 1024, 2048],
                       help='地图尺寸（像素），默认512')
     parser.add_argument('--output', type=str, default='./maps',
                       help='输出目录路径，默认./maps')
@@ -996,26 +827,6 @@ def main():
                 
                 
                 
-                if args.path == 1:
-                    path_num = 5
-                    paths = []
-                    # np.set_printoptions(threshold=np.inf)
-                    # print("map_data:{}".format(map_data))
-                    for n in range(path_num):
-                        print(f"Generating path {n+1}/{path_num} for {map_name}")
-                        path_generator = PathGenerator(map_data, agent_radius)
-                        path = path_generator.get_leader_paths()
-                        if path:
-                            paths.append(path)
-                    
-                    # Save paths if we have any
-                    if paths:
-                        import pickle
-                        path_filename = output_dir / f"{map_name}_paths.pkl"
-                        with open(path_filename, 'wb') as f:
-                            pickle.dump(paths, f)
-                        print(f"Saved {len(paths)} paths to {path_filename.name}")
-
 
 
             else:

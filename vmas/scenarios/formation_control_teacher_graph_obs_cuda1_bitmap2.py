@@ -188,7 +188,7 @@ class Scenario(BaseScenario):
         self.is_evaluation_mode = kwargs.get("is_evaluation_mode", False)
         self.evaluation_index = kwargs.get("evaluation_index", 0)
 
-        self.lidar_range = kwargs.get("lidar_range", 5.0)
+        self.lidar_range = kwargs.get("lidar_range", 2.5)
         if self.working_mode == "imitation":
             self.agent_radius = kwargs.get("agent_radius", 0.5)
         else:
@@ -256,9 +256,9 @@ class Scenario(BaseScenario):
         self.reached_leader_path_end =torch.zeros(batch_dim, device=self.device, dtype=torch.bool)
         self.formation_out_of_shape = torch.zeros(batch_dim, device=self.device, dtype=torch.bool)
         self.max_distance_from_follower_to_leader = 12.0
-        self.current_lidar_reading = None
+        self.current_lidar_reading = {}
 
-
+        # self.varied_formation_width = torch.rand(batch_dim, device=self.device)
 
 
         world = World(batch_dim, device, substeps=2)
@@ -356,6 +356,8 @@ class Scenario(BaseScenario):
         elif self.env_type == "bitmap_tunnel":
             train_maps_path = os.path.join(script_dir, "..", self.train_map_directory)
 
+        self.origin = [-12.8, -12.8]
+        self.scale = 0.1
         # self.create_obstacles(self.obstacle_pattern, world)
         self.bitmap = self.create_bitmap_obstacle(train_maps_path, world, batch_dim)
         # print("bitmap:{}".format(self.bitmap.shape))
@@ -429,7 +431,7 @@ class Scenario(BaseScenario):
                         Lidar(
                             world,
                             n_rays=20,
-                            max_range=self.lidar_range / 2.0,
+                            max_range=self.lidar_range,
                             entity_filter=detect_obstacles,
                         ),
                     ]
@@ -619,7 +621,6 @@ class Scenario(BaseScenario):
         
         # Randomly sample map_num maps
         selected_maps = random.sample(bitmap_files, map_num)
-        
         # Process all selected maps into binary arrays
         binary_bitmaps = []
         
@@ -662,14 +663,15 @@ class Scenario(BaseScenario):
             bitmap_tensor = bitmap_tensor[:world.batch_dim]
         # print("bitmap_tensor shape:{}".format(bitmap_tensor.shape))
         # Create a single bitmap obstacle with the batched tensor
-        origin = [-12.8, -12.8]  # Example origin coordinates (bottom-left corner)
+        # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+        # origin = [-12.8, -12.8]
         resolution = 0.1       # Example resolution (meters per pixel)
         
         bitmap_obstacle = BitmapObstacle(
             name="map",
             bitmap=bitmap_tensor,
             resolution=resolution,
-            origin=origin
+            origin=self.origin
         )
         world.add_landmark(bitmap_obstacle)
         
@@ -2856,6 +2858,80 @@ class Scenario(BaseScenario):
                 print(f"Data saved to {file_name}")
 
 
+    def reset_world_at_with_init_pose(self, env_index, init_x, init_y, init_direction):
+        """
+        Reset the world state for a specific environment index with a specified initial direction.
+        
+        Args:
+            env_index (int): The index of the environment to reset
+            init_direction (float or torch.Tensor): The initial heading direction in radians
+        """
+        # Ensure the direction is a tensor with the proper device
+        if not torch.is_tensor(init_direction):
+            init_direction = torch.tensor(init_direction, device=self.device)
+        
+        # Reset timestep counter for this environment
+        if hasattr(self, 't'):
+            self.t = 0
+        
+        # Position the leader agent at the origin
+        self.leader_agent.set_pos(
+            torch.tensor([init_x, init_y], device=self.device),
+            batch_index=env_index,
+        )
+        
+        # Set the formation center to match the leader's position
+        self.formation_center.set_pos(
+            torch.tensor([init_x, init_y], device=self.device),
+            batch_index=env_index,
+        )
+        
+        # Set the formation center position record
+        self.formation_center_pos[env_index, 0] = init_x
+        self.formation_center_pos[env_index, 1] = init_y
+        
+        # Set the leader's rotation to the initial direction
+        self.leader_agent.set_rot(init_direction, batch_index=env_index)
+        self.formation_center.set_rot(init_direction, batch_index=env_index)
+        self.formation_center_pos[env_index, 2] = init_direction
+
+        nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+        nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+        # Reset follower agents to their initial positions in the formation
+        # These positions need to be rotated according to the leader's new orientation
+        for i, agent in enumerate(self.world.agents):
+            if i == 0:  # Skip the leader agent (already set)
+                continue
+                
+            # Get the nominal formation position for this agent (relative to leader)
+            nominal_x = nominal_positions_x[i]
+            nominal_y = nominal_positions_y[i]
+            
+            # Rotate the nominal position by init_direction
+            cos_rot = torch.cos(init_direction)
+            sin_rot = torch.sin(init_direction)
+            rotated_x = nominal_x * cos_rot - nominal_y * sin_rot + init_x
+            rotated_y = nominal_x * sin_rot + nominal_y * cos_rot + init_y
+            
+            # Set the agent's position (leader at origin + rotated offset)
+            agent.set_pos(
+                torch.tensor([rotated_x, rotated_y], device=self.device),
+                batch_index=env_index,
+            )
+            
+            # Set the agent's rotation to match the leader's rotation
+            agent.set_rot(init_direction, batch_index=env_index)
+            
+            # Initialize velocity and angular velocity to zero
+            agent.set_vel(
+                torch.tensor([0.0, 0.0], device=self.device),
+                batch_index=env_index,
+            )
+            agent.set_ang_vel(
+                torch.tensor(0, device=self.device),
+                batch_index=env_index,
+            )
+
     def reset_world_at_with_init_direction(self, env_index, init_direction):
         """
         Reset the world state for a specific environment index with a specified initial direction.
@@ -3401,10 +3477,11 @@ class Scenario(BaseScenario):
         
         for dim in range(self.batch_dim):
             # print("compute path {}".format(dim))
-            print("get_leader path dim:{}".format(dim))
+            # print("get_leader path dim:{}".format(dim))
             bitmap = self.bitmap.bitmap[dim, :]
-            origin = [-12.8, -12.8]  # Example origin coordinates (bottom-left corner)
-            scale = 0.1
+            # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+            # origin = [-12.8, -12.8]
+            # scale = 0.1
             # Convert bitmap to numpy if it's a torch tensor
             if isinstance(bitmap, torch.Tensor):
                 bitmap = bitmap.cpu().numpy()
@@ -3421,12 +3498,12 @@ class Scenario(BaseScenario):
             bitmap_height, bitmap_width = bitmap.shape
             
             # Convert world position to bitmap coordinates
-            start_x = int((start_pos[0] - origin[0]) / scale)
-            start_y = int((start_pos[1] - origin[1]) / scale)
+            start_x = int((start_pos[0] - self.origin[0]) / self.scale)
+            start_y = int((start_pos[1] - self.origin[1]) / self.scale)
             start_coord = (start_y, start_x)
             
             # Make sure start position is valid
-            if not self._is_valid_point(start_coord, bitmap) or not self._is_safe_point(start_coord, bitmap, agent_radius / scale):
+            if not self._is_valid_point(start_coord, bitmap) or not self._is_safe_point(start_coord, bitmap, agent_radius / self.scale):
             
                 # print("Leader's starting position is invalid or too close to obstacles")
                 # input("Leader's starting position is invalid or too close to obstacles")
@@ -3446,6 +3523,20 @@ class Scenario(BaseScenario):
                 inflation_radius = 2.0
             elif self.train_map_directory == "train_maps_5_clutter":
                 inflation_radius = 0.5
+
+            if self.train_map_directory == "train_maps_0_test":
+                inflation_radius = 3.0
+            elif self.train_map_directory == "train_maps_1_test":
+                inflation_radius = 3.0
+            elif self.train_map_directory == "train_maps_2_test":
+                inflation_radius = 2.5
+            elif self.train_map_directory == "train_maps_3_test":
+                inflation_radius = 2.0
+            elif self.train_map_directory == "train_maps_4_test":
+                inflation_radius = 1.5
+            elif self.train_map_directory == "train_maps_5_test":
+                inflation_radius = 1.0
+
 
             # if self.train_map_directory == "train_maps_0_clutter":
             #     inflation_radius = 0.5
@@ -3471,12 +3562,15 @@ class Scenario(BaseScenario):
                     if self.env_type == "bitmap_tunnel":
                         target_x = int(bitmap_width - 10)
                         target_y = int(bitmap_height / 2.0)
+                        
                     else:
+                        # target_x = random.randint(bitmap_width-2, bitmap_width - 1)
+                        # target_y = random.randint(bitmap_width//2 - 10, bitmap_height//2 +  10)
                         target_x = random.randint(0, bitmap_width - 1)
                         target_y = random.randint(0, bitmap_height - 1)
 
-                    if target_x > int(bitmap_width / 3.0) and target_x < int(bitmap_width / 3.0 * 2.0) and target_y > int(bitmap_height / 3.0) and target_y < int(bitmap_height / 3.0 * 2.0):
-                        continue
+                    # if target_x > int(bitmap_width / 3.0) and target_x < int(bitmap_width / 3.0 * 2.0) and target_y > int(bitmap_height / 3.0) and target_y < int(bitmap_height / 3.0 * 2.0):
+                    #     continue
                     # if random.random() < 0.5:
                     #     target_x = random.randint(0, int(bitmap_width / 3.0))
                     # else:
@@ -3494,44 +3588,49 @@ class Scenario(BaseScenario):
                     # Ensure target point is valid and safe
 
 
-                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / scale + inflation_radius):
+                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / self.scale + inflation_radius):
                         target_found = True
                         break
                         
                 if not target_found:
-                    # No valid target found in 100 attempts, try next trial
+
+                    print("No valid target found in 1000 attempts, try next trial")
                     continue
+                
+                
                 # print("safe buffer:{}".format(agent_radius / scale))
                 # Find path using A* algorithm with safety buffer for agent radius
-                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / scale + inflation_radius))
+                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / self.scale + inflation_radius))
                 
                 # If path found, simplify it and convert back to world coordinates
                 if path:
-                    if self._is_path_near_obstacles(path, bitmap, check_radius_pixels=30, min_near_points_ratio=0.03):
-                        # Simplify path (remove unnecessary waypoints)
-                        simplified_path = self._simplify_path(path, bitmap, agent_radius / scale)
-                        
-                        # Convert to world coordinates
-                        world_path = []
-                        path_idx = 0
-                        for y, x in path:
-                            if path_idx > 10:
-                                world_x = x * scale + origin[0] - 0.03 +  random.random()*0.06
-                                world_y = y * scale + origin[1] - 0.03 +  random.random()*0.06
-                            else:
-                                world_x = x * scale + origin[0] 
-                                world_y = y * scale + origin[1] 
-                            world_path.append(torch.tensor([world_x, world_y], device=self.leader_agent.state.pos.device))
-                            path_idx += 1
-                        # print("world_path:{}".format(world_path))
-                        # input("got path for dim {}".format(dim))
-                        self.batch_leader_paths.append(world_path)
+                    # if self._is_path_near_obstacles(path, bitmap, check_radius_pixels=35, min_near_points_ratio=0.03):
+                    # Simplify path (remove unnecessary waypoints)
+                    # simplified_path = self._simplify_path(path, bitmap, agent_radius / scale)
+                    
+                    # Convert to world coordinates
+                    world_path = []
+                    path_idx = 0
+                    for y, x in path:
+                        if path_idx > 10:
+                            world_x = x * self.scale + self.origin[0] - 0.03 +  random.random()*0.06
+                            world_y = y * self.scale + self.origin[1] - 0.03 +  random.random()*0.06
+                        else:
+                            world_x = x * self.scale + self.origin[0] 
+                            world_y = y * self.scale + self.origin[1] 
+                        world_path.append(torch.tensor([world_x, world_y], device=self.leader_agent.state.pos.device))
+                        path_idx += 1
+                    # print("world_path:{}".format(world_path))
+                    # input("got path for dim {}".format(dim))
+                    self.batch_leader_paths.append(world_path)
 
-                        target_found = True
-                        print("path found")
-                        break
-                    else:
-                        continue
+                    target_found = True
+                    print("path found")
+                    break
+                
+                else:
+                    print("no path found between {} to {}".format(start_coord, target_coord))
+                    continue
             if target_found == False:
             # If reached here, no path found after max_trials
                 print(f"No valid path found after {max_trials} attempts")
@@ -3543,11 +3642,88 @@ class Scenario(BaseScenario):
         for dim in range(self.batch_dim):
             # print("dim:{}".format(dim))
             init_direction = self.compute_leader_init_direction(self.batch_leader_paths[dim])
+            # start_index, init_x, init_y, init_direction = self.find_random_leader_starting_point(dim, self.batch_leader_paths[dim])
             self.reset_world_at_with_init_direction(dim, init_direction)
-        
-
+            # self.reset_world_at_with_init_pose(dim, init_x, init_y, init_direction)
+            # self.batch_leader_paths[dim] = self.batch_leader_paths[dim][start_index:]
         return self.batch_leader_paths
     
+
+
+    def find_random_leader_starting_point(self, dim, world_path):
+        default_angle = torch.tensor(0.0, device=self.device)
+
+        if not world_path or len(world_path) < 2:
+            return 0, 0, 0, default_angle
+        
+        path_length = len(world_path)
+        num_trials = 1000
+        trial_index = 0
+        check_start_index = 0
+        while trial_index < num_trials:
+            if path_length > 60:
+                check_start_index = np.random.randint(1, path_length - 30)
+            else:
+                check_start_index = 0
+            is_free, init_x, init_y, init_direction = self.check_formation_free(dim, world_path, check_start_index)
+            if is_free:
+                return check_start_index, init_x, init_y, init_direction
+
+            trial_index += 1
+
+        init_direction = self.compute_leader_init_direction(world_path)
+        return 0, 0, 0, init_direction
+
+    def check_formation_free(self, dim, world_path, check_start_index):
+        first_waypoint = world_path[check_start_index]
+        second_waypoint = world_path[check_start_index + 1]
+        bitmap = self.bitmap.bitmap[dim, :]
+        # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
+        # origin = [-12.8, -12.8]
+        # scale = 0.1
+        # Convert bitmap to numpy if it's a torch tensor
+        if isinstance(bitmap, torch.Tensor):
+            bitmap = bitmap.cpu().numpy()
+        # Calculate the vector from first to second waypoint
+        dx = second_waypoint[0] - first_waypoint[0]
+        dy = second_waypoint[1] - first_waypoint[1]
+        
+        init_x = first_waypoint[0]
+        init_y = first_waypoint[1]
+        # Calculate the angle in world frame (atan2 gives angle in range [-π, π])
+        # Use torch.atan2 to maintain compatibility with tensors
+        if torch.is_tensor(dx) and torch.is_tensor(dy):
+            angle = torch.atan2(dy, dx)
+        else:
+            angle = torch.tensor(math.atan2(dy, dx), device=self.device)
+        
+        init_direction = angle
+        nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+        nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+        # Reset follower agents to their initial positions in the formation
+        # These positions need to be rotated according to the leader's new orientation
+        for i, agent in enumerate(self.world.agents):
+            if i == 0:  # Skip the leader agent (already set)
+                continue
+                
+            # Get the nominal formation position for this agent (relative to leader)
+            nominal_x = nominal_positions_x[i]
+            nominal_y = nominal_positions_y[i]
+            
+            # Rotate the nominal position by init_direction
+            cos_rot = torch.cos(init_direction)
+            sin_rot = torch.sin(init_direction)
+            rotated_x = nominal_x * cos_rot - nominal_y * sin_rot + init_x
+            rotated_y = nominal_x * sin_rot + nominal_y * cos_rot + init_y
+            transform_agent_x = int((rotated_x - self.origin[0]) / self.scale)
+            transform_agent_y = int((rotated_y - self.origin[1]) / self.scale)
+            transform_agent_coord = (transform_agent_y, transform_agent_x)
+            
+            # Make sure start position is valid
+            if not self._is_valid_point(transform_agent_coord, bitmap) or not self._is_safe_point(transform_agent_coord, bitmap, self.agent_radius / self.scale):
+                return False, None, None, None
+
+        return True,  init_x, init_y, init_direction
 
     def compute_leader_init_direction(self, world_path):
         """
@@ -3831,21 +4007,21 @@ class Scenario(BaseScenario):
                 ang_vel[env_idx] = angular_gain * angle_diff
                 
                 # Set linear velocity based on distance and angle alignment
-                max_speed = 0.4  # Maximum speed
+                max_speed = 0.5  # Maximum speed
                 
                 # Reduce speed when not well-aligned with the target
                 alignment_factor = torch.cos(angle_diff)
-                alignment_factor = torch.clamp(alignment_factor, 0.3, 1.0)  # Between 0.3 and 1
+                alignment_factor = torch.clamp(alignment_factor, 0.6, 1.0)  # Between 0.3 and 1
                 
                 # When the angle difference is large, focus on turning first
                 if abs(angle_diff) > 0.5:  # About 30 degrees
                     speed = max_speed * 0.5  # Move slower when turning sharply
                 else:
                     speed = max_speed * alignment_factor
-                random_factor = random.random()
+                # random_factor = random.random()
                 # Set velocity components in world frame
-                vel_x[env_idx] = speed *random_factor* torch.cos(leader_rot + angle_diff * 0.5)
-                vel_y[env_idx] = speed *random_factor* torch.sin(leader_rot + angle_diff * 0.5)
+                vel_x[env_idx] = speed * torch.cos(leader_rot + angle_diff * 0.5)
+                vel_y[env_idx] = speed * torch.sin(leader_rot + angle_diff * 0.5)
                 
                 # vel_x[env_idx] = 0.01
                 # vel_y[env_idx] = 0.0
@@ -4389,7 +4565,7 @@ class Scenario(BaseScenario):
 
         lidar_sensor = agent.sensors[0]
         max_range = lidar_sensor._max_range
-        lidar_readings = max_range - self.current_lidar_reading
+        lidar_readings = max_range - self.current_lidar_reading[agent_index]
          # Shape: [batch_size, num_beams] (e.g., [batch_size, 20])
         num_beams = lidar_readings.shape[1]
         batch_size = lidar_readings.shape[0]
@@ -4955,18 +5131,18 @@ class Scenario(BaseScenario):
             torch.Tensor: A tensor of shape [batch_dim] with the calculated reward.
         """
         self.OBSTACLE_PENALTY_STEEPNESS = 5.0
-
+        current_agent_index = self.world.agents.index(agent)
         # This is the maximum penalty an agent can receive from this reward component.
         # Keeping this value from being excessively large is key to training stability.
         # Good starting range: -1.0 to -20.0
         self.MAX_OBSTACLE_PENALTY = -10.0
         
         # The distance at which the penalty starts. Should be greater than min_range.
-        self.PENALTY_START_DISTANCE = 1.0 
+        self.PENALTY_START_DISTANCE = 2.0 
         # Ensure agent observation is valid before proceeding
         
 
-        lidar_readings = self.current_lidar_reading # Shape: [batch_dim, lidar_ray_num]
+        lidar_readings = self.current_lidar_reading[current_agent_index] # Shape: [batch_dim, lidar_ray_num]
         batch_dim = lidar_readings.shape[0]
 
         if batch_dim == 0:
@@ -5145,7 +5321,110 @@ class Scenario(BaseScenario):
         angle = torch.where(angle < -torch.pi, angle + 2 * torch.pi, angle)
         return angle
 
-    
+    def _transform_to_leader_local_frame(self, global_positions: Tensor, leader_pos: Tensor, leader_orient: Tensor) -> Tensor:
+        """
+        Transforms global XY positions to the leader's local coordinate frame.
+        
+        Returns:
+            Tensor of shape [batch_dim, N, 2] with local (x, y) coordinates.
+        """
+        # Translate positions relative to the leader
+        translated_pos = global_positions - leader_pos.unsqueeze(1) # Broadcasting
+        
+        # Rotate translated positions to align with leader's frame (rotation by -leader_orient)
+        neg_leader_orient = -leader_orient
+        cos_neg_lo = torch.cos(neg_leader_orient).unsqueeze(2)
+        sin_neg_lo = torch.sin(neg_leader_orient).unsqueeze(2)
+        
+        x_translated = translated_pos[..., 0].unsqueeze(2)
+        y_translated = translated_pos[..., 1].unsqueeze(2)
+        
+        local_x = x_translated * cos_neg_lo - y_translated * sin_neg_lo
+        local_y = x_translated * sin_neg_lo + y_translated * cos_neg_lo
+        
+        return torch.cat([local_x, local_y], dim=2)
+
+
+    def compute_group_sector_reward(self):
+        """
+        Computes a reward based on containing followers and their centroid within
+        a sector defined in polar coordinates relative to the leader.
+        """
+        self.SECTOR_MIN_RADIUS = 0.5  # meters, closest followers can get to the leader
+        self.SECTOR_MAX_RADIUS = 5  # meters, farthest followers can get from the leader
+        self.SECTOR_HALF_ANGLE = np.deg2rad(85) # rad, e.g., +/- 60 degrees from leader's back
+
+        # --- Centroid Target Parameters ---
+        # Defines the smaller, ideal region for the group's center.
+        # This now defines a "sweet spot" range for the centroid's distance.
+        self.CENTROID_MIN_RADIUS = 1.1 # The closest the centroid should ideally be
+        self.CENTROID_MAX_RADIUS = 3.5 # The farthest the centroid should ideally be
+        self.CENTROID_HALF_ANGLE = np.deg2rad(85) # rad, angular tolerance for the centroid
+
+        # --- Reward Scaling ---
+        # Penalty for individual followers leaving the main sector
+        self.OUT_OF_SECTOR_PENALTY_SCALE = -15.0
+        # Penalty for the group centroid deviating from its ideal position
+        self.CENTROID_ERROR_PENALTY_SCALE = -10.0
+        # if self.total_num_agents <= 1:
+        #     return torch.zeros(self.batch_dim, device=self.device)
+
+        follower_agents = [agent for agent in self.world.agents if agent is not self.leader_agent]
+        if not follower_agents:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        leader_pos = self.leader_agent.state.pos
+        leader_orient = self.leader_agent.state.rot
+
+        # --- 1. Get all follower positions in the leader's local frame ---
+        all_follower_pos_global = torch.stack([agent.state.pos for agent in follower_agents], dim=1)
+        follower_pos_local = self._transform_to_leader_local_frame(all_follower_pos_global, leader_pos, leader_orient)
+        # print("follower_pos_local:{}".format(follower_pos_local))
+        # --- 2. Convert local XY to local Polar coordinates for each follower ---
+        follower_radii = torch.norm(follower_pos_local, dim=2) 
+        # print("follower radii:{}".format(follower_radii))
+        follower_angles = torch.atan2(follower_pos_local[..., 1], follower_pos_local[..., 0])
+        # print("follower_angles:{}".format(follower_angles))
+        # --- 3. Calculate Individual Follower Containment Penalty ---
+        # Radial error: how far each follower is outside the min/max radius bounds
+        radius_error_low = torch.relu(self.SECTOR_MIN_RADIUS - follower_radii)
+        radius_error_high = torch.relu(follower_radii - self.SECTOR_MAX_RADIUS)
+        radius_error = radius_error_low + radius_error_high
+
+        # Angular error: how far each follower is from the leader's BACKWARD direction (pi radians)
+        # We normalize the difference to get the smallest angle.
+        angular_error_from_back = torch.abs(self._normalize_angle(follower_angles - torch.pi))
+        # print("angular error from back:{}".format(angular_error_from_back))
+        # input("1")
+        angle_error = torch.relu(angular_error_from_back - self.SECTOR_HALF_ANGLE)
+        
+        # Combine errors and apply a bounded penalty. Sum over all followers.
+        total_follower_error = torch.sqrt(radius_error**2 + angle_error**2)
+        per_follower_penalty = self.OUT_OF_SECTOR_PENALTY_SCALE * torch.tanh(total_follower_error)
+        individual_containment_penalty = torch.sum(per_follower_penalty, dim=1)
+
+        # --- 4. Calculate Group Centroid Cohesion Penalty ---
+        centroid_pos_local = torch.mean(follower_pos_local, dim=1)
+        centroid_radius = torch.norm(centroid_pos_local, dim=1)
+        centroid_angle = torch.atan2(centroid_pos_local[:, 1], centroid_pos_local[:, 0])
+
+        # Calculate error from the ideal centroid position (range of radii behind leader)
+        centroid_radius_error_low = torch.relu(self.CENTROID_MIN_RADIUS - centroid_radius)
+        centroid_radius_error_high = torch.relu(centroid_radius - self.CENTROID_MAX_RADIUS)
+        centroid_radius_error = centroid_radius_error_low + centroid_radius_error_high
+        
+        # Angular error for centroid relative to the backward direction
+        centroid_angular_error_from_back = torch.abs(self._normalize_angle(centroid_angle - torch.pi))
+        centroid_angle_error = torch.relu(centroid_angular_error_from_back - self.CENTROID_HALF_ANGLE)
+
+        total_centroid_error = torch.sqrt(centroid_radius_error**2 + centroid_angle_error**2)
+        centroid_cohesion_penalty = self.CENTROID_ERROR_PENALTY_SCALE * torch.tanh(total_centroid_error)
+
+        # --- 5. Combine Penalties ---
+        final_group_reward = individual_containment_penalty + centroid_cohesion_penalty
+        
+        return final_group_reward
+
     def compute_group_center_reward(self):
         
         self.VIRTUAL_CENTER_RELATIVE_X = -1.8  # meters (target behind leader)
@@ -5155,10 +5434,6 @@ class Scenario(BaseScenario):
         self.GROUP_CENTER_POS_REWARD_SCALE = -1.0
         self.GROUP_CENTER_ORIENT_REWARD_SCALE = -0.5
         
-        self.RECTANGLE_CENTER_X_OFFSET = -3.0  # Longitudinal offset of rectangle center from leader (negative for behind)
-        self.RECTANGLE_LATERAL_HALFWIDTH = 0.4   # Half-width (y-extent in leader's frame)
-        self.RECTANGLE_LONGITUDINAL_HALFLENGTH = 3 # Half-length (x-extent in leader's frame, around its center_x_offset)
-        self.OUT_OF_RECTANGLE_PENALTY_SCALE = -10.0 # Penalty scale for being outside
 
         self.OPEN_SPACE_CENTER_X = -1.8
         self.OPEN_SPACE_LATERAL_HALFWIDTH = 2.0  # Wide containment box
@@ -5166,7 +5441,7 @@ class Scenario(BaseScenario):
 
         # --- Target Formation Parameters (for narrow, line formations) ---
         self.LINE_FORMATION_CENTER_X = -3.0  # Centroid is further back
-        self.LINE_FORMATION_LATERAL_HALFWIDTH = 0.1 # Very narrow containment
+        self.LINE_FORMATION_LATERAL_HALFWIDTH = 0.01 # Very narrow containment
         self.LINE_FORMATION_LONGITUDINAL_HALFLENGTH = 3.0
 
         # --- Reward Scaling ---
@@ -5214,6 +5489,8 @@ class Scenario(BaseScenario):
         alpha = torch.sigmoid(
             self.OPENING_TO_LINE_TRANSITION_STEEPNESS * (self.OPENING_TRANSITION_MIDPOINT - total_opening_width)
         )
+        # print("alpha shape:{}".format(alpha.shape))
+        alpha = torch.ones(self.batch_dim, device=self.device)
         # Interpolate the desired X offset for the group center
         dynamic_center_x = (1 - alpha) * self.OPEN_SPACE_CENTER_X + alpha * self.LINE_FORMATION_CENTER_X
 
@@ -5221,8 +5498,13 @@ class Scenario(BaseScenario):
         asymmetry = self.smoothed_left_opening - self.smoothed_right_opening
         dynamic_center_y = self.MAX_LATERAL_SHIFT * torch.tanh(self.LATERAL_ADAPTATION_SCALE * asymmetry)
         
+        dynamic_center_y = torch.zeros(self.batch_dim, device=self.device)
+
         # Interpolate the rectangle dimensions
         dynamic_rect_lat_halfwidth = (1 - alpha) * self.OPEN_SPACE_LATERAL_HALFWIDTH + alpha * self.LINE_FORMATION_LATERAL_HALFWIDTH
+        # dynamic_rect_lat_halfwidth = self.varied_formation_width * self.LINE_FORMATION_LATERAL_HALFWIDTH
+        
+        
         dynamic_rect_long_halfwidth = (1 - alpha) * self.OPEN_SPACE_LONGITUDINAL_HALFLENGTH + alpha * self.LINE_FORMATION_LONGITUDINAL_HALFLENGTH
 
         rel_x_vc = self.VIRTUAL_CENTER_RELATIVE_X
@@ -5514,13 +5796,14 @@ class Scenario(BaseScenario):
         #             # a.formation_rew[collision_free_mask] = agent_formation_rew[collision_free_mask]
             self.connection_rew = self.compute_connectivity_reward()
             # print("connection time:{}".format(time.time() - connection_time))
-            self.group_center_diff_rew = self.compute_group_center_reward()
+            # self.group_center_diff_rew = self.compute_group_center_reward()
+            self.group_center_diff_rew = self.compute_group_sector_reward()
         #leader robot do not contribute to the reward
 
         agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
         if self.env_type == "bitmap":
-            
-            agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
+            pass
+            # agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
         if is_first:
             # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
             return agent.target_collision_rew
@@ -5574,7 +5857,7 @@ class Scenario(BaseScenario):
         agent.connection_rew = 25*agent.connection_rew
         agent.action_diff_rew = 50*agent.action_diff_rew
         agent.angle_diff_with_leader_rew = 0.8*agent.angle_diff_with_leader_rew
-        agent.collision_obstacle_rew = 3* agent.collision_obstacle_rew
+        agent.collision_obstacle_rew = 15* agent.collision_obstacle_rew
         agent.pos_rew = 5* agent.pos_rew
         # agent.target_collision_rew = 10*agent.target_collision_rew
         # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
@@ -5593,8 +5876,9 @@ class Scenario(BaseScenario):
             #     rewards_setup2,       # Value if condition is True
             #     rewards_setup1        # Value if condition is False
             # ) 
+            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew
             
-            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew + agent.collision_obstacle_rew
+            # return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew + agent.collision_obstacle_rew
 
             # return agent.connection_rew + agent.group_center_rew + agent.agent_collision_rew + agent.collision_obstacle_rew
         elif self.env_type == "bitmap_tunnel":
@@ -5940,7 +6224,7 @@ class Scenario(BaseScenario):
             # print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
             raw_lidar_reading = agent.sensors[0].measure()
             lidar_observation_tensor = [(agent.sensors[0]._max_range - raw_lidar_reading) / agent.sensors[0]._max_range]
-            self.current_lidar_reading = raw_lidar_reading
+            self.current_lidar_reading[current_agent_index] = copy.deepcopy(raw_lidar_reading)
             if current_agent_index == 0:
                 # agnet.sensors[0].measure()   shape: [batch_size, lidar_ray_num]
                 # print("leader lidar reading shape:{}".format(agent.sensors[0].measure().shape))  
@@ -5973,7 +6257,7 @@ class Scenario(BaseScenario):
         nominal_formation_tensor[:, 0] = nominal_positions_x[current_agent_index]
         nominal_formation_tensor[:, 1] = nominal_positions_y[current_agent_index]
         nominal_formation_tensor[:, 2] = 0.0
-        previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
+        # previous_positions = self.agent_history.get_previous_positions()  # [num_agents, history_length, 2]
 
         relative_poses = []
         for d in range(self.world.batch_dim):
@@ -6007,7 +6291,7 @@ class Scenario(BaseScenario):
                 relative_poses.append(torch.cat([rotated_pos, rel_theta_normalized.unsqueeze(0)]))
         # print("relative_pos shape:{}".format(torch.stack(relative_poses).shape))
         opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=0)
-        print("opening_tensor shape:{}".format(opening_tensor.shape))
+        # print("opening_tensor shape:{}".format(opening_tensor.shape))
         if self.has_laser == True:
             return {
                 'laser': torch.tensor(lidar_observation_tensor[0]),  # shape [B, 20]
