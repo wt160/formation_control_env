@@ -3,7 +3,7 @@ import time
 import os
 
 # Script to run (must be executable and in PATH or provide full path)
-TRAINING_SCRIPT = "ppo_train_bitmap_new.py" # Or "python ppo_train_bitmap.py" if not executable
+TRAINING_SCRIPT = "ppo_evaluation_bitmap_new.py" # Or "python ppo_train_bitmap.py" if not executable
 
 # --- Define Experiment Configurations ---
 # Each dictionary contains the arguments for one run of ppo_train_bitmap.py
@@ -11,10 +11,13 @@ experiment_configurations = [
     {
         "experiment_name": "ppo_bitmap_lr3e4_std0.2_rwg1_rwc-0.5",
         "train_env_type": "bitmap",
-        "policy_filename": "ppo_bitmap_clutter.pth", # Optional: if you have one
-        "critic_filename": "ppo_bitmap_clutter_critic.pth", 
-        "output_policy_filename": "ppo_bitmap_clutter_dwa.pth",
-        "output_critic_filename": "ppo_bitmap_clutter_critic_dwa.pth",
+        "empty_policy_filename": "ppo_bitmap_empty.pth", # Optional: if you have one
+        "clutter_policy_filename": "ppo_bitmap_clutter.pth", # Optional: if you have one
+        "clutter_to_tunnel_policy_filename": "ppo_bitmap_clutter_to_tunnel.pth", # Optional: if you have one
+        "tunnel_policy_filename": "ppo_bitmap_tunnel_with_laser.pth",
+        "critic_filename": "", 
+        "output_policy_filename": "output.pth",
+        "output_critic_filename": "output_critic.pth",
         "steps_per_epoch": 700,
         "epochs": 50000, # Shorter for example
         "device": "cpu", # Assign specific GPU if available
@@ -23,9 +26,9 @@ experiment_configurations = [
         "reward_weight_goal": 1.0,
         "reward_weight_collision": -0.5,
         "num_envs": 20,
-        "seed": 0,
+        "seed": 1,
         "has_laser": True,
-        "train_map_directory": "train_maps_1_clutter",
+        "train_map_directory": "train_maps_3_clutter",
         "use_leader_laser_only": False,
     },
     # {5_rwc-0.8_seed1",
@@ -80,7 +83,7 @@ for i, config in enumerate(experiment_configurations):
         # Otherwise, for consistency, convert other multi-word keys from underscore to hyphen for CLI.
 
         # --- ADJUST THIS LOGIC BASED ON YOUR ppo_train_bitmap_new.py DEFINITIONS --- 
-        if arg_name_key in ["critic_filename", "output_critic_filename", "train_map_directory", "train_env_type", "action_std_init", "reward_weight_goal", "reward_weight_collision", "policy_filename", "output_policy_filename", "experiment_name", "steps_per_epoch", "num_envs", "learning_rate", "has_laser", "use_leader_laser_only"]: # Add other keys that are defined with underscores in ppo_train_bitmap_new.py
+        if arg_name_key in ["clutter_to_tunnel_policy_filename", "empty_policy_filename", "clutter_policy_filename", "tunnel_policy_filename", "critic_filename", "output_critic_filename", "train_map_directory", "train_env_type", "action_std_init", "reward_weight_goal", "reward_weight_collision", "policy_filename", "output_policy_filename", "experiment_name", "steps_per_epoch", "num_envs", "learning_rate", "has_laser", "use_leader_laser_only"]: # Add other keys that are defined with underscores in ppo_train_bitmap_new.py
             param_name_cli = f"--{arg_name_key}" # Use underscore directly
         elif arg_name_key in []: # Add keys defined with hyphens in ppo_train_bitmap_new.py
              param_name_cli = f"--{arg_name_key.replace('_', '-')}" # Convert to hyphen

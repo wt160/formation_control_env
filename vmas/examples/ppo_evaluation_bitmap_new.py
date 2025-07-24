@@ -84,6 +84,10 @@ class VMASWrapper:
         # obs = torch.stack(obs, dim=1).to(self.device)
         return self.get_obs()
 
+    def get_forward_env_type(self):
+        env_type = self.env.get_forward_env_type()
+        return env_type
+
     def get_obs(self):
         obs = self.env.get_obs()
         # obs = obs[
@@ -561,6 +565,156 @@ class GATActorWithLaser(nn.Module):
         agent_embeddings = x[agent_node_indices]
         return agent_embeddings
 
+class GATActorWithoutLaser(nn.Module):
+    def __init__(self, in_channels, hidden_channels, action_dim, num_agents, x_limit, y_limit, theta_limit):
+        super(GATActorWithoutLaser, self).__init__()
+        self.num_agents = num_agents
+
+
+        self.lidar_cnn_hidden_channels_c1 = 16 # Hidden channels for first CNN layer (e.g., 16)
+        self.lidar_cnn_hidden_channels_c2 = 32 # Hidden channels for second CNN layer (e.g., 32)
+        self.lidar_embedding_dim = 5
+        self.lidar_dim = 20
+        self.forward_opening_dim = 2
+        self.lidar_encoder_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=self.lidar_cnn_hidden_channels_c1, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2), # Halves sequence length if lidar_dim is even
+            nn.Conv1d(in_channels=self.lidar_cnn_hidden_channels_c1, out_channels=self.lidar_cnn_hidden_channels_c2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1), # Reduces sequence length to 1: Output [N, lidar_cnn_hidden_channels_c2, 1]
+            nn.Flatten(),            # Output: [N_total_nodes, lidar_cnn_hidden_channels_c2]
+            nn.Linear(self.lidar_cnn_hidden_channels_c2, self.lidar_embedding_dim),
+            nn.ReLU()
+        )
+        # Output of lidar_encoder_cnn: [N_total_nodes, lidar_embedding_dim]
+
+        # 2. LiDAR Decoder (MLP to reconstruct raw LiDAR from embedding)
+        self.lidar_decoder_mlp = nn.Sequential(
+            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
+            nn.ReLU(),
+            nn.Linear(hidden_channels, self.lidar_dim) # Output raw lidar_dim
+            # No final activation if raw LiDAR values are not bounded like [0,1].
+            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
+        )
+
+        self.forward_opening_mlp = nn.Sequential(
+            nn.Linear(self.lidar_embedding_dim, hidden_channels), # Use GNN hidden for consistency
+            nn.ReLU(),
+            nn.Linear(hidden_channels, self.forward_opening_dim) # Output raw lidar_dim
+            # No final activation if raw LiDAR values are not bounded like [0,1].
+            # If LiDAR inputs are normalized to [0,1], add nn.Sigmoid() here.
+        )
+
+        gnn_input_channels = in_channels 
+        # GAT layers
+        self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean', add_self_loops=False)
+        self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+        self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
+
+        
+
+
+
+        limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
+        self.action_limits = limits_tensor.view(1, action_dim)
+        # self.register_buffer('action_limits', limits_tensor.view(1, self.action_dim))
+        # Global pooling layer
+        self.pool = global_mean_pool
+
+        # Actor network (policy head)
+        self.fc1 = nn.Sequential(
+            nn.Linear(hidden_channels * 16 + 3, hidden_channels * 4),
+            nn.ReLU()
+        )
+        self.fc2 = nn.Linear(hidden_channels * 4, action_dim * 2)
+        # self.log_std = nn.Parameter(torch.zeros(1, 1, action_dim))
+    def forward(self, data):
+        x_all_features, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        # print("x_all_features shape:{}".format(x_all_features.shape))
+        # nominal_pos_diff = x[:, 3:]
+
+        original_node_features = x_all_features[:, self.lidar_dim: self.lidar_dim + 6 ] # All columns except the last lidar_dim ones
+        
+        raw_lidar_scans_all_nodes = x_all_features[:, :self.lidar_dim]  # The first lidar_dim columns
+        last_action_features = x_all_features[:, self.lidar_dim + 6:]
+
+        processed_lidar_features = self.lidar_encoder_cnn(raw_lidar_scans_all_nodes.unsqueeze(1))
+        # print("processed_lidar_features:{}".format(processed_lidar_features))
+        # 2. Decode LiDAR for reconstruction loss (using the same processed features)
+        reconstructed_lidar_all_nodes = self.lidar_decoder_mlp(processed_lidar_features)
+
+        # forward_opening = self.forward_opening_mlp(processed_lidar_features)
+        # unique_rows_tensor = forward_opening[::5]
+        # 3. Early Fusion: Concatenate processed LiDAR features with original non-LiDAR node features
+        # x_for_gnn = torch.cat([original_node_features, processed_lidar_features], dim=1)
+        
+        x = self.conv1(original_node_features, edge_index, edge_attr.squeeze(dim=1))
+        x = torch.relu(x)
+        x = self.conv2(x, edge_index, edge_attr)
+        x = torch.relu(x)
+        x = self.conv3(x, edge_index, edge_attr)
+        x = torch.relu(x)
+
+        # Global graph embedding
+        graph_embedding = self.pool(x, data.batch)  # Shape: [batch_size, hidden_channels * 8]
+
+        # Extract agent node embeddings
+        agent_embeddings = self.extract_agent_embeddings(x, data.batch, data.num_graphs)
+
+
+        agent_lidar_embeddings = self.extract_agent_embeddings(processed_lidar_features, data.batch, data.num_graphs)
+
+        last_action_embeddings = self.extract_agent_embeddings(last_action_features, data.batch, data.num_graphs)
+        # Repeat graph embedding for each agent
+        graph_embedding_repeated = graph_embedding.repeat_interleave(self.num_agents, dim=0)
+        # print("agent_embedding shape:{}".format(agent_embeddings.shape))
+        # print("nominal_pos_diff shape:{}".format(nominal_pos_diff.shape))
+        # print("graph embedding shape:{}".format(graph_embedding_repeated.shape))
+        # Concatenate agent embeddings with graph embeddings
+        combined = torch.cat([agent_embeddings, graph_embedding_repeated, last_action_embeddings], dim=1)
+        # print("combined shape:{}".format(combined.shape))
+        # Actor head
+        actor_hidden = self.fc1(combined)
+
+        mean_and_std_params = self.fc2(actor_hidden)
+        
+        # Split into raw mean and raw std parameters
+        # Each will have shape: [batch_size * num_agents, action_dim]
+        action_mean_raw, action_std_raw_params = torch.chunk(mean_and_std_params, 2, dim=-1)
+        
+        # Process action_mean_raw: apply tanh and scale by limits
+        action_mean_tanh = torch.tanh(action_mean_raw)
+        action_mean_scaled = action_mean_tanh * self.action_limits # self.action_limits is broadcasted
+        
+        min_std_val = 0.01
+        max_std_val = 0.3
+        std_output_scaled = torch.sigmoid(action_std_raw_params) # scales to (0, 1)
+        action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val)
+        action_std_processed = action_std_processed + 1e-5 # Epsilon for stability
+        # Process action_std_raw_params: apply softplus to ensure positivity
+        # action_std_processed = F.softplus(action_std_raw_params)
+        # Optional: Add a small epsilon for numerical stability if std can become too close to zero
+        # action_std_processed = F.softplus(action_std_raw_params) + 1e-6 
+        # --- END MODIFICATION ---
+
+        # Reshape to (num_graphs, num_agents, action_dim)
+        action_mean = action_mean_scaled.view(data.num_graphs, self.num_agents, -1)
+        action_std = action_std_processed.view(data.num_graphs, self.num_agents, -1)
+
+        return action_mean, action_std, raw_lidar_scans_all_nodes, reconstructed_lidar_all_nodes
+
+    def extract_agent_embeddings(self, x, batch, batch_size):
+        agent_node_indices = []
+        for graph_idx in range(batch_size):
+            node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
+            agent_nodes = node_indices[:self.num_agents]
+            agent_node_indices.append(agent_nodes)
+
+        agent_node_indices = torch.cat(agent_node_indices, dim=0)
+        agent_embeddings = x[agent_node_indices]
+        return agent_embeddings
+
 
 class GATCriticWithLaser(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_agents):
@@ -801,31 +955,51 @@ def main(args):
     # Initialize the models
     if args.has_laser:
         clutter_actor_model = GATActorWithLaser(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
-
+        empty_actor_model = GATActorWithLaser(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
+        tunnel_transform_actor_model = GATActorWithoutLaser(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
+        tunnel_actor_model = GATActorWithLaser(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
         # clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
     
     else:
         clutter_actor_model = GATActor(in_channels, hidden_dim, action_dim, num_agents, x_limit, y_limit, theta_limit).to(device)
 
     
-    critic_model = GATCriticWithLaser(in_channels + 20 + 3, hidden_dim, num_agents).to(device)
 
-    if args.policy_filename != "":
-        policy_pretrained_weights = torch.load(args.policy_filename, map_location=device)
+    if args.empty_policy_filename != "":
+        policy_pretrained_weights = torch.load(args.empty_policy_filename, map_location=device)
+        policy_pretrained_weights = {k: v for k, v in policy_pretrained_weights.items() if k in empty_actor_model.state_dict()}
+        empty_actor_model.load_state_dict(policy_pretrained_weights)
+        print("load policy from {}".format(args.empty_policy_filename))
+
+    else:
+        empty_actor_model.apply(initialize_weights)
+
+    if args.clutter_policy_filename != "":
+        policy_pretrained_weights = torch.load(args.clutter_policy_filename, map_location=device)
         policy_pretrained_weights = {k: v for k, v in policy_pretrained_weights.items() if k in clutter_actor_model.state_dict()}
         clutter_actor_model.load_state_dict(policy_pretrained_weights)
-        print("load policy from {}".format(args.policy_filename))
+        print("load policy from {}".format(args.clutter_policy_filename))
 
     else:
         clutter_actor_model.apply(initialize_weights)
-    if args.critic_filename != "":
-        critic_pretrained_weights = torch.load(args.critic_filename, map_location=device )
-        critic_pretrained_weights = {k: v for k, v in critic_pretrained_weights.items() if k in critic_model.state_dict()}
-        critic_model.load_state_dict(critic_pretrained_weights)
-        print("load critic from {}".format(args.critic_filename))
-    else:
-        critic_model.apply(initialize_weights)
 
+    if args.clutter_to_tunnel_policy_filename != "":
+        policy_pretrained_weights = torch.load(args.clutter_to_tunnel_policy_filename, map_location=device)
+        policy_pretrained_weights = {k: v for k, v in policy_pretrained_weights.items() if k in tunnel_transform_actor_model.state_dict()}
+        tunnel_transform_actor_model.load_state_dict(policy_pretrained_weights)
+        print("load policy from {}".format(args.clutter_to_tunnel_policy_filename))
+
+    else:
+        tunnel_transform_actor_model.apply(initialize_weights)
+    
+    if args.tunnel_policy_filename != "":
+        policy_pretrained_weights = torch.load(args.tunnel_policy_filename, map_location=device)
+        policy_pretrained_weights = {k: v for k, v in policy_pretrained_weights.items() if k in tunnel_actor_model.state_dict()}
+        tunnel_actor_model.load_state_dict(policy_pretrained_weights)
+        print("load policy from {}".format(args.tunnel_policy_filename))
+
+    else:
+        tunnel_actor_model.apply(initialize_weights)
     # model = GATActorCritic(in_channels, hidden_dim, action_dim, num_agents).to(device)
     from datetime import datetime
 
@@ -839,606 +1013,153 @@ def main(args):
     # print("clutter_actor para:{}".format(clutter_actor_model.state_dict()))
     # input("1")
     # model.load_state_dict(model_state_dict)
-    actor_optimizer = optim.Adam(clutter_actor_model.parameters(), lr=3e-4)
-    critic_optimizer = optim.Adam(critic_model.parameters(), lr=3e-4)
-
-    # PPO Hyperparameters
-    num_epochs = 3000
-    num_agents = 5
-    # steps_per_epoch = 300
-    epoch_restart_num = 1
-    gamma = 0.99
-    lam = 0.95
-    clip_epsilon = 0.2
-    entropy_coef = 0.01
-    value_loss_coef = 0.5
-    max_grad_norm = 0.5
-    ppo_epochs = 10
-    mini_batch_size_graphs = 256
-    def compute_returns_and_advantages(rewards, masks, values, gamma, lam, device):
-        # rewards: [num_steps, num_envs]
-        # masks: [num_steps, num_envs] (1 if not done, 0 if done)
-        # values: [num_steps + 1, num_envs] (values[t] is V(s_t), values[num_steps] is V(s_T))
-        num_steps, num_envs = rewards.shape
-        advantages = torch.zeros(num_steps, num_envs, device=device)
-        returns = torch.zeros(num_steps, num_envs, device=device)
-        gae = torch.zeros(num_envs, device=device)
-
-        for step in reversed(range(num_steps)):
-            delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
-            gae = delta + gamma * lam * masks[step] * gae
-            advantages[step] = gae
-            returns[step] = gae + values[step]
-        return returns, advantages
-    # def compute_returns_and_advantages(rewards, masks, values, gamma, lam):
-    #     advantages = torch.zeros_like(rewards).to(device)
-    #     returns = torch.zeros_like(rewards).to(device)
-    #     gae = 0
-    #     # print("advantage shaoe:{}".format(advantages.shape))
-    #     for step in reversed(range(len(rewards))):
-    #         # print("values[step+1] shape:{}".format(values[step+1].shape))
-    #         # print("mask[step] shape:{}".format(masks[step].shape))
-    #         delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
-    #         gae = delta + gamma * lam * masks[step] * gae
-    #         advantages[step] = gae
-    #         returns[step] = advantages[step] + values[step]
-    #     return returns, advantages
-
-    warm_up_epochs=0
-    train_num_envs = args.num_envs
-    ep_rewards = []
-    best_avg_reward = float('-inf')
-    best_evaluation_reward = float('-inf')
-    for epoch in range(num_epochs):
-        clutter_actor_model.train()
-        critic_model.train()
-
-        # [num_envs]
-        max_steps_per_episode = 250  # Adjust as needed
-        # Initialize storage
-        epoch_actions_list = []
-        epoch_log_probs_list = []
-        epoch_values_list = []
-        epoch_rewards_list = []
-        epoch_dones_list = []
-        epoch_obs_data_list = [] # This will be a flat list of Data objects
-        epoch_forward_opening_list = []
-        epoch_run_rewards_log = [] # For logging mean re
-
-
-
-        obs_storage = []
-        actions_storage = []
-        log_probs_storage = []
-        rewards_storage = []
-        dones_storage = []
-        values_storage = []
-        epoch_rewards = []
-        masks_storage = [] 
-        epoch_group_center_rewards = []
-        epoch_agent_collision_obstacle_rewards = []
-        epoch_agent_collision_rewards = []
-        epoch_agent_connection_rewards = []
-        epoch_agent_action_diff_rewards = []
-        epoch_agent_target_collision_rewards = []
-        epoch_agent_pos_rewards = []
-
-
-
-        # obs = env.reset()  # [num_envs, n_agents, obs_dim]
-        for epoch_restart_idx in range(epoch_restart_num):
-            env = VMASWrapper(
-                scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2_dwa",
-                num_envs=train_num_envs,
-                device=device,
-                continuous_actions=True,
-                n_agents=num_agents,
-                env_type=train_env_type,
-                is_imitation=False,
-                working_mode="RL",
-                has_laser = args.has_laser,
-                train_map_directory = train_map_directory,
-                use_leader_laser_only = args.use_leader_laser_only, 
-
-            )
-            obs_list_of_data = env.get_obs()
-
-            restart_actions = []
-            restart_log_probs = []
-            restart_values = []
-            restart_rewards = []
-            restart_dones = []
-            restart_obs_indices_start = len(epoch_obs_data_list)
-            # env.render()
-            # input("1")
-            current_step_counters = torch.zeros(train_num_envs, device=device)
-            time_start = time.time()
-            for step_idx in range(steps_per_epoch):
-                # print("obs:{}".format(obs))
-                # print("obs[0]:{}".format(obs[0].x))
-                n_agents = num_agents
-                # obs_dim = obs.shape[2]
-                print("step:{}".format(step_idx))
-                # Prepare observations for GNN
-
-
-                batched_obs_for_gnn = Batch.from_data_list(obs_list_of_data).to(device)
-                # Forward pass through the policy
-                with torch.no_grad():
-                    # print("obs list size:{}".format(len(obs)))
-                    # print("obs:{}".format(obs[0]))
-                    # print("obs edge_attr edvice:{}".format(obs[0].edge_attr.device))
-                    # print("obs edge_index deviuce:{}".format(obs[0].edge_index.device))
-                    # print()
-                    # print("batch_obs device:{}".format(batch_obs))
-                    # batch_obs = batch_obs.to(device)
-                    if args.has_laser == True:
-                        # action_mean, action_std = clutter_actor_model(batched_obs_for_gnn) 
-
-                        action_mean, action_std ,_, _ = clutter_actor_model(batched_obs_for_gnn)  # Now returns action_std
-                    else:
-                        action_mean, action_std = clutter_actor_model(batched_obs_for_gnn) 
-                    # print("action_mean:{}".format(action_mean))
-                    # print("action std:{}".format(action_std))
-                    # input("1")
-                    dist = torch.distributions.Normal(action_mean, action_std)
-                    
-                    env.set_action_mean(action_mean)
-                    action_sampled_per_env = dist.sample() # [train_num_envs, num_agents, action_dim]
-                    log_prob_per_env = dist.log_prob(action_sampled_per_env).sum(dim=-1) # [train_num_envs, num_agents]
-                    # print("action_sample:{}".format(action_sampled_per_env))
-                    # print("batch_obs:{}".format(batch_obs))
-                    # action_mean, state_value = model(batch_obs)
-                    # action_mean = actor_model(batch_obs)
-                    state_value_per_env = critic_model(batched_obs_for_gnn).squeeze(-1) # [train_num_envs]
-                    # print("action_mean:{}".format(action_mean))
-                
-                epoch_obs_data_list.extend(obs_list_of_data) # Add individual Data objects
-                restart_actions.append(action_sampled_per_env)
-                restart_log_probs.append(log_prob_per_env)
-                restart_values.append(state_value_per_env)
-                
-                # Reshape actions for the environment
-                action_for_env_step = [action_sampled_per_env[:, i, :] for i in range(num_agents)]
-                # with torch.no_grad():
-                #     expert_logits = expert_gate_net(batch_obs)  # [batch_size, num_experts]
-                #     expert_probs = torch.softmax(expert_logits, dim=1)  # [batch_size, num_experts]
-                #     selected_experts = torch.argmax(expert_probs, dim=1)  # [batch_size]
-                # # print("selected_experts:{}".format(selected_experts))
-                # # Define desired environment type (e.g., class 1: clutter)
-                # desired_class = 1
-                # desired_mask = (selected_experts == desired_class)  # [batch_size] bool tensor
-                
-                # Increment step counters
-                current_step_counters += 1  # [num_envs]
-                # step_counters += desired_mask.float()
-                
-                # Determine if max steps reached
-                done_override_max_steps = current_step_counters >= max_steps_per_episode
-                # Combine done signals: terminate if not desired or max steps reached
-                # done_override = max_steps_reached  # [batch_size] bool tensor
-                
-
-
-                # Step the environment with overridden done signals
-                next_obs_list_of_data, rewards_per_env, dones_per_env, infos = \
-                    env.step(action_for_env_step, done_override=done_override_max_steps)
-                
-                # next_obs, rewards, dones, infos = env.step(list_of_agent_actions, done_override=done_override)
-
-                restart_rewards.append(rewards_per_env)
-                restart_dones.append(dones_per_env)
-
-                epoch_run_rewards_log.append(rewards_per_env.mean().item())
-                # Reset step counters for environments that are done
-                current_step_counters = torch.where(dones_per_env, torch.zeros_like(current_step_counters), current_step_counters)
-
-                obs_list_of_data = next_obs_list_of_data # For next iteration
-
-
-
-                epoch_forward_opening_list.extend(infos[0]["forward_opening"])
-                
-                if (step_idx + 1) % 100 == 0:
-                    print(f"Epoch {epoch+1}/{num_epochs}, Restart {epoch_restart_idx+1}/{epoch_restart_num}, Step {step_idx+1}/{steps_per_epoch}")
-                # next_obs, rewards, dones, infos = env.step(action_env)
-                # env.render()
-                # rewards = rewards.to(device)
-                # dones = dones.to(device)
-                # next_obs = [data.to(device) for data in next_obs]
-
-                # step_counters = torch.where(done_override, torch.zeros_like(step_counters), step_counters)
-                # print("rewards device:{}".format(rewards.device))
-                # mean_rewards = rewards.mean().item()
-                for agent_index, agent in enumerate(env.env.agents):
-                    agent_name = agent.name
-                    agent_info = infos[agent_index]
-                    epoch_agent_pos_rewards.append(agent_info["agent_pos_rew"].mean().cpu().item())
-                    epoch_group_center_rewards.append(agent_info["group_center_rew"].mean().cpu().item()) 
-                    epoch_agent_collision_obstacle_rewards.append(agent_info["collision_obstacle_rew"].mean().cpu().item()) 
-                    epoch_agent_collision_rewards.append(agent_info["agent_collisions"].mean().cpu().item())
-                    epoch_agent_connection_rewards.append(agent_info["agent_connection_rew"].mean().cpu().item())
-                    epoch_agent_action_diff_rewards.append(agent_info["agent_diff_rew"].mean().cpu().item())
-                    epoch_agent_target_collision_rewards.append(agent_info["agent_target_collision"].mean().cpu().item())
-
-
-
-            epoch_actions_list.append(torch.stack(restart_actions, dim=0)) # Stacks along new dim 0 (steps)
-            epoch_log_probs_list.append(torch.stack(restart_log_probs, dim=0))
-            epoch_values_list.append(torch.stack(restart_values, dim=0))
-            epoch_rewards_list.append(torch.stack(restart_rewards, dim=0))
-            epoch_dones_list.append(torch.stack(restart_dones, dim=0))
-                # epoch_rewards.append(mean_rewards)
-            
-            # env.close()
-        
-        if not epoch_rewards_list: # Should not happen if steps_per_epoch > 0
-            print(f"Epoch {epoch+1}: No data collected. Skipping update.")
-            continue
-
-        actions_tensor = torch.cat(epoch_actions_list, dim=0)
-        log_probs_tensor = torch.cat(epoch_log_probs_list, dim=0)
-        values_tensor = torch.cat(epoch_values_list, dim=0)
-        rewards_tensor = torch.cat(epoch_rewards_list, dim=0)
-        dones_tensor = torch.cat(epoch_dones_list, dim=0)
-                # for env_idx in range(batch_size):
-                #     # if dones[env_idx] == False:
-                #     # if desired_mask[env_idx]:
-                #     obs_storage.append(obs[env_idx])
-                #     actions_storage.append(action_env[env_idx])
-                #     log_probs_storage.append(log_prob[env_idx])
-                #     rewards_storage.append(rewards[env_idx])
-                #     dones_storage.append(dones[env_idx])
-                #     values_storage.append(state_value[env_idx])
-                #     masks_storage.append(1.0)  # Mask indicating desired environment
-                    # else:
-                        # Skip storing data for undesired environments
-                        # continue
-
-
-                # obs_storage.append(obs)
-                # actions_storage.append(action_env)
-                # log_probs_storage.append(log_prob.view(batch_size, n_agents))
-                # rewards_storage.append(rewards)
-                # dones_storage.append(dones)
-                # values_storage.append(state_value.squeeze(dim=1))
-                # obs = next_obs
-                # writer.add_scalar('Policy/std', action_std.mean().item(), epoch * steps_per_epoch*epoch_restart + steps_per_epoch*epoch_restart_num + step)
-        print("collect time:{}".format(time.time() - time_start))
-
-
-        avg_agent_collision_rew = np.mean(epoch_agent_collision_rewards)
-        avg_group_center_rew = np.mean(epoch_group_center_rewards)
-        avg_agent_collision_obstacle_rew = np.mean(epoch_agent_collision_obstacle_rewards)
-        avg_agent_connection_rew = np.mean(epoch_agent_connection_rewards)
-        avg_agent_action_diff_rew = np.mean(epoch_agent_action_diff_rewards)
-        avg_agent_pos_rew = np.mean(epoch_agent_pos_rewards)
-
-        # avg_target_collision_rew = np.mean(epoch_agent_target_collision_rewards)
-
-        # ep_rewards.append(avg_reward)
-        # writer.add_scalar('Reward/avg_reward', avg_reward, epoch)
-        swanlab.log({'Reward/avg_group_center_rew': avg_group_center_rew, 
-                     'Reward/agent_collision_rew': avg_agent_collision_rew,
-                     'Reward/agent_collision_obstacle_rew': avg_agent_collision_obstacle_rew,
-                     'Reward/agent_connection_rew': avg_agent_connection_rew,
-                     'Reward/agent_action_diff_rew':avg_agent_action_diff_rew,
-                     'Reward/agent_pos_rew':avg_agent_pos_rew}, step=epoch)
-        
-        writer.add_scalar('Reward/avg_group_center_rew', avg_group_center_rew, epoch)
-        writer.add_scalar('Reward/agent_collision_rew',avg_agent_collision_rew, epoch )
-        writer.add_scalar('Reward/agent_collision_obstacle_rew', avg_agent_collision_obstacle_rew, epoch)
-        writer.add_scalar('Reward/agent_connection_rew',avg_agent_connection_rew, epoch )
-        # avg_reward = np.mean(epoch_rewards)
-        # avg_agent_collision_rew = np.mean(epoch_agent_collision_rewards)
-        # avg_agent_connection_rew = np.mean(epoch_agent_connection_rewards)
-        # avg_agent_action_diff_rew = np.mean(epoch_agent_action_diff_rewards)
-        # avg_target_collision_rew = np.mean(epoch_agent_target_collision_rewards)
-
-        # ep_rewards.append(avg_reward)
-        # writer.add_scalar('Reward/avg_reward', avg_reward, epoch)
-        # writer.add_scalar('Reward/agent_collision_rew',avg_agent_collision_rew, epoch )
-        # writer.add_scalar('Reward/agent_connection_rew',avg_agent_connection_rew, epoch )
-        # writer.add_scalar('Reward/agent_action_diff_rew',avg_agent_action_diff_rew, epoch )
-        # writer.add_scalar('Reward/target_collision_rew',avg_target_collision_rew, epoch )
-
-        # if avg_reward > best_avg_reward:
-        #     best_avg_reward = avg_reward
-        #     # **Save the model**
-        #     torch.save(actor_model.state_dict(), 'best_ppo_model.pth')
-        #     print(f'New best model saved with avg_reward: {avg_reward:.4f}')
-        # Convert storage to tensors
-        # obs_storage = torch.stack(obs_storage)  # [steps_per_epoch, num_envs, n_agents, obs_dim]
-        # actions_storage = torch.stack(actions_storage)  # [steps_per_epoch, num_envs, n_agents, action_dim]
-        # print("action_storage shape:{}".format(actions_storage.shape))
-        # log_probs_storage = torch.stack(log_probs_storage)  # [steps_per_epoch, num_envs, n_agents]
-
-        # rewards_storage = torch.stack(rewards_storage)  # [steps_per_epoch, num_envs, n_agents]
-        # print("rewards_storage shape:{}".format(rewards_storage.shape))
-        # dones_storage = torch.stack(dones_storage)  # [steps_per_epoch, num_envs, n_agents]
-        # # print("obs list length:{}".format(len(obs_storage)))
-        # # print("value list length:{}".format(len(values_storage)))
-        # values_storage = torch.stack(values_storage)  # [steps_per_epoch, num_envs, n_agents]
-        # print("values_storage shape:{}".format(values_storage.shape))
-        # masks_storage_tensor = torch.tensor(masks_storage, dtype=torch.float, device=device)  # [num_transitions]
-        # Compute returns and advantages
-        with torch.no_grad():
-            final_batched_obs_for_gnn = Batch.from_data_list(obs_list_of_data).to(device)
-            next_values_for_gae = critic_model(final_batched_obs_for_gnn).squeeze(-1) # [train_num_envs]
-
-            # Append next_values_for_gae for GAE calculation
-            # values_tensor shape: [total_steps, num_envs]
-            # next_values_for_gae shape: [num_envs] -> unsqueeze to [1, num_envs]
-            values_for_gae = torch.cat([values_tensor, next_values_for_gae.unsqueeze(0)], dim=0)
-            masks_for_gae = (~dones_tensor).float() # Shape: [total_steps, num_envs]
-
-            returns_batch_per_env, advantages_batch_per_env = compute_returns_and_advantages(
-                rewards_tensor, masks_for_gae, values_for_gae, gamma, lam, device
-            ) # Output shapes: [total_steps, num_envs]
-
-        # Normalize advantages
-        advantages_flat = advantages_batch_per_env.view(-1) # Flatten to [total_steps * num_envs]
-        advantages_flat_norm = (advantages_flat - advantages_flat.mean()) / (advantages_flat.std() + 1e-8)
-        
-        # Reshape other tensors to be flat for minibatching
-        # Target shape for these: [total_transitions, ...], total_transitions = total_steps * num_envs
-        actions_flat = actions_tensor.reshape(-1, num_agents, action_dim)
-        log_probs_flat = log_probs_tensor.reshape(-1, num_agents)
-        returns_flat = returns_batch_per_env.reshape(-1)
-        # epoch_obs_data_list is already flat list of Data objects, length = total_transitions
-
-        num_total_transitions = len(epoch_obs_data_list)
-        assert num_total_transitions == actions_flat.shape[0], "Mismatch in transition counts"
-
-        
-        
+    
         
         # PPO update
         # print("num_total_transitions :{}".format(num_total_transitions))
-        for _ in range(ppo_epochs):
-            permutation_indices = torch.randperm(num_total_transitions, device=device)
-            for start_idx in range(0, num_total_transitions, mini_batch_size_graphs):
-                end_idx = min(start_idx + mini_batch_size_graphs, num_total_transitions)
-                if end_idx - start_idx < 8 : # Skip very small minibatches
-                    continue
-                
-                mb_indices = permutation_indices[start_idx:end_idx]
-
-
-                # print("epoch_forward_opening length:{}".format(len(epoch_forward_opening_list)))
-                # Create minibatch of Data objects
-                forward_opening_list_mb = [epoch_forward_opening_list[i] for i in mb_indices.cpu().tolist()] 
-                obs_data_list_mb = [epoch_obs_data_list[i] for i in mb_indices.cpu().tolist()] # Get Data objs
-                obs_batched_mb_gnn = Batch.from_data_list(obs_data_list_mb).to(device)
-                # num_graphs in obs_batched_mb_gnn is len(mb_indices)
-
-                actions_mb = actions_flat[mb_indices]           # [mb_len, num_agents, action_dim]
-                log_probs_old_mb = log_probs_flat[mb_indices]   # [mb_len, num_agents]
-                returns_mb = returns_flat[mb_indices]           # [mb_len]
-                advantages_mb = advantages_flat_norm[mb_indices]# [mb_len]
-
-                # Actor forward pass
-
-
-                if args.has_laser == True:
-                    new_action_mean_mb, new_action_std_mb, agent_raw_lidar_targets_mb, agent_reconstructed_lidar_mb = clutter_actor_model(obs_batched_mb_gnn)
-                    # new_action_mean_mb, new_action_std_mb  = clutter_actor_model(obs_batched_mb_gnn)
-
-                else:
-                    new_action_mean_mb, new_action_std_mb  = clutter_actor_model(obs_batched_mb_gnn)
-
-
-                # Shapes: [mb_len, num_agents, action_dim]
-                new_dist_mb = torch.distributions.Normal(new_action_mean_mb, new_action_std_mb)
-                new_log_probs_mb = new_dist_mb.log_prob(actions_mb).sum(dim=-1) # [mb_len, num_agents]
-                entropy_mb = new_dist_mb.entropy().sum(dim=-1) # [mb_len, num_agents]
-
-                # Critic forward pass
-                new_state_values_mb = critic_model(obs_batched_mb_gnn).squeeze(-1) # [mb_len]
-
-                # PPO Ratio and Losses
-                # Sum log_probs over agents dimension before calculating ratio
-                ratio = torch.exp(new_log_probs_mb.sum(dim=1) - log_probs_old_mb.sum(dim=1)) # [mb_len]
-                
-                surr1 = ratio * advantages_mb
-                surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages_mb
-                actor_loss = -torch.min(surr1, surr2).mean()
-                
-                critic_loss = nn.functional.mse_loss(new_state_values_mb, returns_mb)
-                
-                entropy_bonus = entropy_mb.mean() # Average entropy over minibatch and agents
-
-
-
-                forward_opening_tensor = torch.stack(forward_opening_list_mb, dim=0)
-
-                # Actor update
-                reconstruction_loss_coef = 0.01 
-
-                actor_optimizer.zero_grad()
-
-                if args.has_laser == True:
-                    # forward_opening_loss = F.mse_loss(forward_opening_tensor, forward_opening_output_mb)
-                    lidar_reconstruction_loss = F.mse_loss(agent_reconstructed_lidar_mb, agent_raw_lidar_targets_mb)
-                    actor_total_loss = actor_loss - entropy_coef * entropy_bonus + reconstruction_loss_coef * lidar_reconstruction_loss #+ 0.1 * forward_opening_loss
-                    # actor_total_loss = actor_loss - entropy_coef * entropy_bonus 
-
-                else:
-                    actor_total_loss = actor_loss - entropy_coef * entropy_bonus 
-
-                actor_total_loss.backward()
-                nn.utils.clip_grad_norm_(clutter_actor_model.parameters(), max_grad_norm)
-                actor_optimizer.step()
-
-                # Critic update
-                critic_optimizer.zero_grad()
-                critic_total_loss = value_loss_coef * critic_loss
-                critic_total_loss.backward()
-                nn.utils.clip_grad_norm_(critic_model.parameters(), max_grad_norm)
-                critic_optimizer.step()
-                
-        # Logging after PPO updates for the epoch
-        avg_epoch_run_reward = np.mean(epoch_run_rewards_log) if epoch_run_rewards_log else 0
         
         
         
-        swanlab.log({'Training/AverageReward_DuringCollection': avg_epoch_run_reward, 
-                     'Loss/ActorLoss': actor_loss.item(),
-                     'Loss/CriticLoss': critic_loss.item(),
-                     'Loss/EntropyBonus': entropy_bonus.item()}, step=epoch)
         
-        writer.add_scalar('Training/AverageReward_DuringCollection', avg_epoch_run_reward, epoch)
-        writer.add_scalar('Loss/ActorLoss', actor_loss.item(), epoch) # Last minibatch loss
-        writer.add_scalar('Loss/CriticLoss', critic_loss.item(), epoch) # Last minibatch loss
-        writer.add_scalar('Loss/EntropyBonus', entropy_bonus.item(), epoch) # Last minibatch entropy
-        # Log mean std from actor model (get from a sample batch)
-        if len(epoch_obs_data_list) > 0:
-            sample_obs_for_std_log = Batch.from_data_list(epoch_obs_data_list[:min(8, len(epoch_obs_data_list))]).to(device)
+        
+        
+    from vmas.simulator.utils import save_video
+    
+    clutter_actor_model.eval()
+    tunnel_actor_model.eval()
+    eval_rewards_all_episodes = []
+    eval_epoch_restart_num = 20 # Number of different evaluation scenarios
+    eval_num_envs = 1 # Evaluate one environment at a time for clear video/metrics
+    eval_steps_per_episode = 700
+    forward_env_type = torch.zeros(args.num_envs, device=device, dtype=torch.long)
+    # For simplicity, collision/connection metrics are not re-implemented here
+    # but would follow a similar pattern to the training loop's info handling if needed.
+    print("eval :train_map_directory:{}".format(train_map_directory))
+    for eval_idx in range(eval_epoch_restart_num):
+        eval_env = VMASWrapper(
+            scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2", # Or a specific eval scenario
+            num_envs=eval_num_envs,
+            device=device,
+            continuous_actions=True,
+            n_agents=num_agents,
+            env_type=train_env_type, # Or a dedicated eval type
+            is_evaluation_mode=True,
+            working_mode="RL",
+            evaluation_index=1000 + eval_idx, # Use different eval indices
+            has_laser = args.has_laser,
+            train_map_directory = train_map_directory,
+            use_leader_laser_only = args.use_leader_laser_only, 
+        )
+        eval_obs_list = eval_env.get_obs() # List of Data objects (len=eval_num_envs)
+        
+        current_episode_frames = []
+        current_episode_reward_sum = 0
+
+        for eval_step_idx in range(eval_steps_per_episode):
             with torch.no_grad():
+                eval_batched_obs = Batch.from_data_list(eval_obs_list).to(device)
+                # Use deterministic actions (mean) for evaluation
+                # forward_env_type = eval_env.get_forward_env_type()
+
                 if args.has_laser == True:
-                    _, act_std_sample, _, _ = clutter_actor_model(sample_obs_for_std_log)
-                    # _, act_std_sample= clutter_actor_model(sample_obs_for_std_log)
+                    if forward_env_type[0].item() == 0:
+                        eval_action_mean, _, _, _ = empty_actor_model(eval_batched_obs)
+                    elif forward_env_type[0].item() == 1:
+                        eval_action_mean, _, _, _ = clutter_actor_model(eval_batched_obs)
+                    elif forward_env_type[0].item() == 2:
+                        eval_action_mean, _, _, _ = tunnel_transform_actor_model(eval_batched_obs)
+                    elif forward_env_type[0].item() == 3:
+                        eval_action_mean, _, _, _ = tunnel_actor_model(eval_batched_obs)    
+                    # eval_action_mean, _= clutter_actor_model(eval_batched_obs)
 
                 else:
-                    _, act_std_sample = clutter_actor_model(sample_obs_for_std_log)
-                writer.add_scalar('Policy/MeanActionStd', act_std_sample.mean().item(), epoch)
-                swanlab.log({'Policy/MeanActionStd': act_std_sample.mean().item()}, step=epoch)
-
-        print(f'Epoch {epoch + 1}/{num_epochs}, Avg Reward (collection): {avg_epoch_run_reward:.3f}, ActorL: {actor_loss.item():.3f}, CriticL: {critic_loss.item():.3f}')
+                    eval_action_mean, _= clutter_actor_model(eval_batched_obs)
+                # eval_action_mean shape: [eval_num_envs, num_agents, action_dim]
             
-        
-        
-        from vmas.simulator.utils import save_video
-        if (epoch) % 5 == 0: # Evaluate every 10 epochs
-            clutter_actor_model.eval()
-            critic_model.eval()
-            eval_rewards_all_episodes = []
-            eval_epoch_restart_num = 2 # Number of different evaluation scenarios
-            eval_num_envs = 1 # Evaluate one environment at a time for clear video/metrics
-            eval_steps_per_episode = 700
-
-            # For simplicity, collision/connection metrics are not re-implemented here
-            # but would follow a similar pattern to the training loop's info handling if needed.
-            print("eval :train_map_directory:{}".format(train_map_directory))
-            for eval_idx in range(eval_epoch_restart_num):
-                eval_env = VMASWrapper(
-                    scenario_name="formation_control_teacher_graph_obs_cuda1_bitmap2_dwa", # Or a specific eval scenario
-                    num_envs=eval_num_envs,
-                    device=device,
-                    continuous_actions=True,
-                    n_agents=num_agents,
-                    env_type=train_env_type, # Or a dedicated eval type
-                    is_evaluation_mode=True,
-                    working_mode="RL",
-                    evaluation_index=1000 + eval_idx, # Use different eval indices
-                    has_laser = args.has_laser,
-                    train_map_directory = train_map_directory,
-                    use_leader_laser_only = args.use_leader_laser_only, 
-                )
-                eval_obs_list = eval_env.get_obs() # List of Data objects (len=eval_num_envs)
-                
-                current_episode_frames = []
-                current_episode_reward_sum = 0
-
-                for eval_step_idx in range(eval_steps_per_episode):
-                    with torch.no_grad():
-                        eval_batched_obs = Batch.from_data_list(eval_obs_list).to(device)
-                        # Use deterministic actions (mean) for evaluation
-
-                        if args.has_laser == True:
-                            eval_action_mean, _, _, _ = clutter_actor_model(eval_batched_obs)
-                            # eval_action_mean, _= clutter_actor_model(eval_batched_obs)
-
-                        else:
-                            eval_action_mean, _= clutter_actor_model(eval_batched_obs)
-                        # eval_action_mean shape: [eval_num_envs, num_agents, action_dim]
-                    
-                    eval_action_for_env = [eval_action_mean[:, i, :] for i in range(num_agents)]
-                    
-                    eval_next_obs_list, eval_rewards, eval_dones, _ = eval_env.step(eval_action_for_env)
-                    # eval_rewards, eval_dones are [eval_num_envs]
-
-                    if eval_num_envs == 1: # If rendering a single env
-                        frame = eval_env.render()
-                        if frame is not None:
-                            current_episode_frames.append(frame)
-                    
-                    current_episode_reward_sum += eval_rewards[0].item() # Assuming eval_num_envs=1
-                    eval_obs_list = eval_next_obs_list
-
-                    # if eval_dones[0]: # Assuming eval_num_envs=1
-                    #     break 
-                
-                eval_rewards_all_episodes.append(current_episode_reward_sum)
-                if current_episode_frames: # Save video of the first eval episode
-                    save_video(f"{log_dir}/eval_E{epoch+1}_R{eval_idx}", current_episode_frames, fps=15)
-                # eval_env.close()
-
-            avg_eval_reward = np.mean(eval_rewards_all_episodes) if eval_rewards_all_episodes else 0
-            swanlab.log({'Evaluation/AverageReward': avg_eval_reward}, step=epoch)
-            curriculum_transition_return.append(avg_eval_reward)
-            writer.add_scalar('Evaluation/AverageReward', avg_eval_reward, epoch)
-            print(f'Epoch {epoch + 1} Evaluation: Avg Reward: {avg_eval_reward:.3f}')
-
-            train_map_level = 0
-            if train_map_directory == "train_maps_0_clutter":
-                train_map_level = 0
-            if train_map_directory == "train_maps_1_clutter":
-                train_map_level = 1
-            if train_map_directory == "train_maps_2_clutter":
-                train_map_level = 2
-            if train_map_directory == "train_maps_3_clutter":
-                train_map_level = 3
-            if train_map_directory == "train_maps_4_clutter":
-                train_map_level = 4
-            if train_map_directory == "train_maps_5_clutter":
-                train_map_level = 5
-            swanlab.log({'Evaluation/train_map_level': train_map_level}, step=epoch)
+            eval_action_for_env = [eval_action_mean[:, i, :] for i in range(num_agents)]
             
+            eval_next_obs_list, eval_rewards, eval_dones, eval_info = eval_env.step(eval_action_for_env)
+            # eval_rewards, eval_dones are [eval_num_envs]
+            forward_env_type = eval_info[0]["env_type"]
+            if eval_num_envs == 1: # If rendering a single env
+                frame = eval_env.render()
+                if frame is not None:
+                    current_episode_frames.append(frame)
+            
+            current_episode_reward_sum += eval_rewards[0].item() # Assuming eval_num_envs=1
+            eval_obs_list = eval_next_obs_list
 
-            if len(curriculum_transition_return) == 5:
-                print("curriculum_transition_return:{}".format(curriculum_transition_return))
-                curriculum_transition_return_mean = np.mean(curriculum_transition_return)
-                print("curriculum transition return mean:{}".format(curriculum_transition_return_mean))
-                curriculum_transition_return = []
-            else:
-                curriculum_transition_return_mean = 0.0
-            if avg_eval_reward > best_evaluation_reward:
-                best_evaluation_reward = avg_eval_reward
-                torch.save(clutter_actor_model.state_dict(), output_policy_filename)
-                torch.save(critic_model.state_dict(), output_critic_filename)
+            # if eval_dones[0]: # Assuming eval_num_envs=1
+            #     break 
+        
+        eval_rewards_all_episodes.append(current_episode_reward_sum)
+        if current_episode_frames: # Save video of the first eval episode
+            save_video(f"{log_dir}/eval_R{eval_idx}", current_episode_frames, fps=15)
+        # eval_env.close()
 
-                print(f'New best evaluation model saved with avg_reward: {best_evaluation_reward:.4f}')
-                if eval_idx == 0 and current_episode_frames : # Save best video again if it's also the first
-                    save_video(f"{log_dir}/BEST_eval_E{epoch+1}", current_episode_frames, fps=15)
+    avg_eval_reward = np.mean(eval_rewards_all_episodes) if eval_rewards_all_episodes else 0
+    swanlab.log({'Evaluation/AverageReward': avg_eval_reward}, step=epoch)
+    curriculum_transition_return.append(avg_eval_reward)
+    writer.add_scalar('Evaluation/AverageReward', avg_eval_reward, epoch)
+    print(f'Epoch {epoch + 1} Evaluation: Avg Reward: {avg_eval_reward:.3f}')
+
+    train_map_level = 0
+    if train_map_directory == "train_maps_0_clutter":
+        train_map_level = 0
+    if train_map_directory == "train_maps_1_clutter":
+        train_map_level = 1
+    if train_map_directory == "train_maps_2_clutter":
+        train_map_level = 2
+    if train_map_directory == "train_maps_3_clutter":
+        train_map_level = 3
+    if train_map_directory == "train_maps_4_clutter":
+        train_map_level = 4
+    if train_map_directory == "train_maps_5_clutter":
+        train_map_level = 5
+    swanlab.log({'Evaluation/train_map_level': train_map_level}, step=epoch)
+    
+
+    if len(curriculum_transition_return) == 5:
+        print("curriculum_transition_return:{}".format(curriculum_transition_return))
+        curriculum_transition_return_mean = np.mean(curriculum_transition_return)
+        print("curriculum transition return mean:{}".format(curriculum_transition_return_mean))
+        curriculum_transition_return = []
+    else:
+        curriculum_transition_return_mean = 0.0
+    if avg_eval_reward > best_evaluation_reward:
+        best_evaluation_reward = avg_eval_reward
+        torch.save(clutter_actor_model.state_dict(), output_policy_filename)
+        torch.save(critic_model.state_dict(), output_critic_filename)
+
+        print(f'New best evaluation model saved with avg_reward: {best_evaluation_reward:.4f}')
+        if eval_idx == 0 and current_episode_frames : # Save best video again if it's also the first
+            save_video(f"{log_dir}/BEST_eval_E{epoch+1}", current_episode_frames, fps=15)
 
 
 
-            if train_env_type == "bitmap_tunnel":
-                if curriculum_transition_return_mean > -200000.0 and train_map_directory == "train_tunnel_maps_0":
-                    train_map_directory = "train_tunnel_maps_1"
-                elif curriculum_transition_return_mean > 20000.0 and train_map_directory == "train_tunnel_maps_1":
-                    train_map_directory = "train_tunnel_maps_2"
-            elif train_env_type == "bitmap":
-                print("change map :{}".format(curriculum_transition_return_mean))
-                if curriculum_transition_return_mean > 13000.0 and train_map_directory == "train_maps_0_clutter":
-                    train_map_directory = "train_maps_1_clutter"
-                    print("change map to train_maos_1_clutter")
-                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_1_clutter":
-                    train_map_directory = "train_maps_2_clutter"
-                elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_2_clutter":
-                    train_map_directory = "train_maps_3_clutter"
-                # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_3_clutter":
-                #     train_map_directory = "train_maps_4_clutter"   
-                # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_4_clutter":
-                #     train_map_directory = "train_maps_5_clutter"   
-                else:
-                    print("why?")
+    if train_env_type == "bitmap_tunnel":
+        if curriculum_transition_return_mean > -200000.0 and train_map_directory == "train_tunnel_maps_0":
+            train_map_directory = "train_tunnel_maps_1"
+        elif curriculum_transition_return_mean > 20000.0 and train_map_directory == "train_tunnel_maps_1":
+            train_map_directory = "train_tunnel_maps_2"
+    elif train_env_type == "bitmap":
+        print("change map :{}".format(curriculum_transition_return_mean))
+        if curriculum_transition_return_mean > 13000.0 and train_map_directory == "train_maps_0_clutter":
+            train_map_directory = "train_maps_1_clutter"
+            print("change map to train_maos_1_clutter")
+        elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_1_clutter":
+            train_map_directory = "train_maps_2_clutter"
+        elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_2_clutter":
+            train_map_directory = "train_maps_3_clutter"
+        # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_3_clutter":
+        #     train_map_directory = "train_maps_4_clutter"   
+        # elif curriculum_transition_return_mean > 10000.0 and train_map_directory == "train_maps_4_clutter":
+        #     train_map_directory = "train_maps_5_clutter"   
+        else:
+            print("why?")
 
 
 
-            clutter_actor_model.train()
-            critic_model.train()
 
     writer.close()
     print("Training finished.")
@@ -1452,6 +1173,12 @@ if __name__ == "__main__":
     parser.add_argument("--experiment_name", type=str, default="ppo_experiment", help="Unique name for the experiment run")
     parser.add_argument("--train_env_type", type=str, required=True, help="Type of training environment (e.g., clutter, door_and_narrow, tunnel, bitmap)")
     parser.add_argument("--policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
+    parser.add_argument("--empty_policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
+    parser.add_argument("--clutter_policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
+    parser.add_argument("--tunnel_policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
+    parser.add_argument("--clutter_to_tunnel_policy_filename", type=str, default="", help="Path to pre-trained policy to load (optional)")
+    
+    
     parser.add_argument("--critic_filename", type=str, default="", help="Path to pre-trained critic to load (optional)")
     parser.add_argument("--output_policy_filename", type=str, default="ppo_policy.pth", help="Suffix for the output policy filename")
     parser.add_argument("--output_critic_filename", type=str, default="ppo_critic.pth", help="Suffix for the output policy filename")
