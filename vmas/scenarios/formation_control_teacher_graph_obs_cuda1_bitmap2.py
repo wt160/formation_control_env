@@ -527,6 +527,41 @@ class Scenario(BaseScenario):
         self.precompute_evaluation_scene(self.env_type)
 
 
+        self.TUNNEL_COMMIT_STEPS = 30 # Hyperparameter: tune based on robot speed and environment scale
+
+        # History buffer to store the last N environment types for each parallel env.
+        # Shape: [batch_dim, history_length]
+        # We initialize it with a non-tunnel type (e.g., 1 for clutter).
+        self.env_type_history = torch.full(
+            (self.batch_dim, self.TUNNEL_COMMIT_STEPS), 
+            fill_value=0, # Default to "clutter"
+            device=self.device, 
+            dtype=torch.long
+        )
+        self.env_type_history_enter_tunnel = torch.full(
+            (self.batch_dim, 10), 
+            fill_value=1, # Default to "clutter"
+            device=self.device, 
+            dtype=torch.long
+        )
+        self.OA_PREDICT_TIME = 0.7              # seconds, how far to look ahead
+        self.OA_SIMULATION_TIMESTEP = 0.1       # seconds, resolution of the simulated path
+        self.OA_ROBOT_RADIUS = 0.25             # meters, for collision checking
+        self.OA_NUM_ANGULAR_SEARCH_STEPS = 10   # Number of alternative angles to check on each side (left/right)
+        
+        # --- Robot Dynamic Constraints ---
+        self.OA_MAX_SPEED_X = 0.7  # m/s
+        self.OA_MAX_SPEED_Y = 0.2  # m/s
+        self.OA_MAX_SPEED_YAW = 0.6 # rad/s
+        self.footprint_local = self._get_robot_footprint()
+        self.OA_PREDICT_TIME = 0.7              # seconds, how far to look ahead
+        self.OA_NUM_VELOCITY_SEARCH_STEPS = 3   # Number of steps to reduce forward velocity
+        
+        # --- Robot Dynamic Constraints ---
+        self.OA_MAX_SPEED_X = 0.5  # m/s
+        self.OA_MAX_SPEED_Y = 0.3  # m/s
+        self.OA_MAX_SPEED_YAW = 1.0 # rad/s
+
         return world
 
     def load_map(self, file_path: str, obstacle_threshold: int = 128) -> torch.Tensor:
@@ -3302,6 +3337,49 @@ class Scenario(BaseScenario):
         
         return False
 
+    def get_forward_env_type(self):
+        instantaneous_env_type = torch.ones(self.batch_dim, device=self.device, dtype=torch.long)
+
+        is_wide_open = (self.smoothed_left_opening > 1.1) & (self.smoothed_right_opening > 1.1)
+        is_narrow = (self.smoothed_left_opening < 0.6) & (self.smoothed_right_opening < 0.6)
+
+        instantaneous_env_type[is_wide_open] = 0
+        instantaneous_env_type[is_narrow] = 2
+        
+        # --- Step 2: Check history to identify "Deep Tunnel" state ---
+        # Check if the last `TUNNEL_COMMIT_STEPS` in the history were all type 2.
+        # This creates a boolean mask of shape [batch_dim].
+        is_deep_in_tunnel = (self.env_type_history == 2).all(dim=1)
+        is_short_in_tunnel = (self.env_type_history_enter_tunnel == 2).all(dim=1)
+        # --- Step 3: Generate the final output type ---
+        # Start with the instantaneous type.
+        final_env_type = instantaneous_env_type.clone()
+        
+        # Where the "deep in tunnel" condition is met, override the type to 3.
+        # This handles the transition from 2 -> 3.
+        final_env_type[is_short_in_tunnel] = 2
+        final_env_type[is_deep_in_tunnel] = 3
+        
+        # --- Step 4: Update the history buffer for the next time step ---
+        # Shift the history one step to the left (discarding the oldest entry).
+        self.env_type_history = torch.roll(self.env_type_history, shifts=-1, dims=1)
+        self.env_type_history_enter_tunnel = torch.roll(self.env_type_history, shifts=-1, dims=1)
+
+        
+        # Add the new *instantaneous* type to the end of the history.
+        # We use the instantaneous type so the history reflects the raw perception,
+        # allowing the "is_deep_in_tunnel" condition to trigger correctly in the future.
+        self.env_type_history[:, -1] = instantaneous_env_type
+        self.env_type_history_enter_tunnel[:, -1] = instantaneous_env_type
+
+        return final_env_type
+
+
+
+
+
+
+        
     def get_leader_paths(self, max_trials=1000):
         """
         Find a path for the leader agent to a randomly selected target point in the bitmap.
@@ -3361,11 +3439,11 @@ class Scenario(BaseScenario):
             elif self.train_map_directory == "train_maps_1_clutter":
                 inflation_radius = 2.5
             elif self.train_map_directory == "train_maps_2_clutter":
-                inflation_radius = 2.0
+                inflation_radius = 2.5
             elif self.train_map_directory == "train_maps_3_clutter":
-                inflation_radius = 1.5
+                inflation_radius = 2.5
             elif self.train_map_directory == "train_maps_4_clutter":
-                inflation_radius = 1.0
+                inflation_radius = 2.0
             elif self.train_map_directory == "train_maps_5_clutter":
                 inflation_radius = 0.5
 
@@ -3429,7 +3507,7 @@ class Scenario(BaseScenario):
                 
                 # If path found, simplify it and convert back to world coordinates
                 if path:
-                    if self._is_path_near_obstacles(path, bitmap, check_radius_pixels=50, min_near_points_ratio=0.03):
+                    if self._is_path_near_obstacles(path, bitmap, check_radius_pixels=30, min_near_points_ratio=0.03):
                         # Simplify path (remove unnecessary waypoints)
                         simplified_path = self._simplify_path(path, bitmap, agent_radius / scale)
                         
@@ -3994,12 +4072,42 @@ class Scenario(BaseScenario):
                         elif self.working_mode == "RL":
                             # agent.state.force = 2*(agent.action.u[:, :2] - agent.state.vel[:, :2])
                             # agent.state.torque = agent.action.u[:, 2].unsqueeze(-1) - agent.state.ang_vel[:, :1]
+                            p_gain_pos = 5.0
+                            p_gain_rot = 1.5
+                            
+                            # Get the error between the current pose and the high-level goal pose
+                            pos_error_x = self.formation_goals[i][:, 0] - agent.state.pos[:, 0]
+                            pos_error_y = self.formation_goals[i][:, 1] - agent.state.pos[:, 1]
+                            # IMPORTANT: Normalize angle error to handle wrap-around (e.g., from pi to -pi)
+                            rot_error = self._normalize_angle(self.formation_goals[i][:, 2] - agent.state.rot[:,0])
+
+                            # Calculate the raw, unclamped velocity commands
+                            vx_desired_unclamped = p_gain_pos * pos_error_x
+                            vy_desired_unclamped = p_gain_pos * pos_error_y
+                            w_desired_unclamped = p_gain_rot * rot_error
+
+                            # --- 2. Clamp the desired velocities to respect physical limits ---
+                            # This uses the maximum speed parameters defined in your ObstacleAvoidanceControllerMixin
+                            vx_clamped = torch.clamp(vx_desired_unclamped, -self.OA_MAX_SPEED_X, self.OA_MAX_SPEED_X)
+                            vy_clamped = torch.clamp(vy_desired_unclamped, -self.OA_MAX_SPEED_Y, self.OA_MAX_SPEED_Y)
+                            w_clamped = torch.clamp(w_desired_unclamped, -self.OA_MAX_SPEED_YAW, self.OA_MAX_SPEED_YAW)
+                            
+                            # This is the realistic velocity command that the high-level policy "wants"
+                            original_velocity_clamped = torch.stack([vx_clamped, vy_clamped, w_clamped], dim=-1)
+
+                            oa_velocity = self.get_oa_velocity(agent, i, original_velocity_clamped)
+                            
                             agent.set_vel(
-                                    torch.stack([5*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 5*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
+                                   oa_velocity[:, :2],
                                 batch_index=None,
                             )
+                            # print("dwa vel:{}".format(apf_vel.shape))
+                        #     agent.set_ang_vel(
+                        #         torch.stack([1.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
+                        # batch_index=None,
+                        #     )       
                             agent.set_ang_vel(
-                                torch.stack([1.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
+                                oa_velocity[:, 2].unsqueeze(dim=-1),
                         batch_index=None,
                             )       
                             # agent.set_vel(
@@ -4046,6 +4154,189 @@ class Scenario(BaseScenario):
                     )
                 # print("formation goal {}, {}".format(i, self.formation_goals_landmark[i].state.pos))
         
+    def _simulate_holonomic_trajectory(self, vx: Tensor, vy: Tensor, w: Tensor) -> Tensor:
+        """
+        Simulates a short trajectory for a holonomic robot given a velocity command.
+        
+        Args:
+            vx, vy, w (Tensor): Tensors of shape [batch_dim] for linear and angular velocities.
+        
+        Returns:
+            Tensor: Simulated trajectory points of shape [batch_dim, num_sim_steps, 2]
+                    in the robot's local frame.
+        """
+        batch_dim = vx.shape[0]
+        num_sim_steps = int(self.OA_PREDICT_TIME / self.OA_SIMULATION_TIMESTEP)
+        
+        # Initialize trajectory points at the origin (robot's local frame)
+        trajectory = torch.zeros(batch_dim, num_sim_steps, 2, device=self.device)
+        
+        # Initial local pose is (0, 0, 0)
+        x = torch.zeros(batch_dim, device=self.device)
+        y = torch.zeros(batch_dim, device=self.device)
+        theta = torch.zeros(batch_dim, device=self.device)
+
+        for t in range(num_sim_steps):
+            # For a holonomic robot, vx and vy are directly in the local frame
+            x += vx * self.OA_SIMULATION_TIMESTEP
+            y += vy * self.OA_SIMULATION_TIMESTEP
+            # Note: For a diff-drive robot, this would be different:
+            # theta += w * self.OA_SIMULATION_TIMESTEP
+            # x += vx * torch.cos(theta) * self.OA_SIMULATION_TIMESTEP
+            # y += vx * torch.sin(theta) * self.OA_SIMULATION_TIMESTEP
+            
+            trajectory[:, t, 0] = x
+            trajectory[:, t, 1] = y
+            
+        return trajectory
+
+    def _get_robot_footprint(self) -> Tensor:
+        """Creates a set of points representing the robot's circular footprint."""
+        footprint = [
+            [0.0, 0.0], [self.OA_ROBOT_RADIUS, 0.0], [-self.OA_ROBOT_RADIUS, 0.0],
+            [0.0, self.OA_ROBOT_RADIUS], [0.0, -self.OA_ROBOT_RADIUS]
+        ]
+        return torch.tensor(footprint, device=self.device, dtype=torch.float32)
+
+    def _check_trajectory_collision(self, trajectory_local: Tensor, current_pos: Tensor, current_rot: Tensor) -> Tensor:
+        """Checks if the robot's circular footprint collides with obstacles along a trajectory."""
+        batch_dim, num_sim_steps, _ = trajectory_local.shape
+        num_footprint_points = self.footprint_local.shape[0]
+
+        trajectory_with_footprint_local = trajectory_local.unsqueeze(2) + self.footprint_local.view(1, 1, -1, 2)
+        
+        cos_rot = torch.cos(current_rot).unsqueeze(1)
+        sin_rot = torch.sin(current_rot).unsqueeze(1)
+        current_pos_exp = current_pos.unsqueeze(1).unsqueeze(2)
+
+        x_local = trajectory_with_footprint_local[..., 0]
+        y_local = trajectory_with_footprint_local[..., 1]
+        x_global_offset = x_local * cos_rot - y_local * sin_rot
+        y_global_offset = x_local * sin_rot + y_local * cos_rot
+        global_traj_points = torch.stack([x_global_offset, y_global_offset], dim=-1) + current_pos_exp
+        
+        global_traj_points_flat = global_traj_points.view(-1, 2)
+        grid_indices = ((global_traj_points_flat - self.bitmap.origin) / self.bitmap.resolution).long()
+        
+        # grid_indices[:, 0] = torch.clamp(grid_indices[:, 0], 0, self.bitmap.grid_size - 1)
+        # grid_indices[:, 1] = torch.clamp(grid_indices[:, 1], 0, self.bitmap.grid_size - 1)
+
+        batch_indices = torch.arange(batch_dim, device=self.device).repeat_interleave(num_sim_steps * num_footprint_points)
+        values = self.bitmap.bitmap[batch_indices, grid_indices[:, 1], grid_indices[:, 0]]
+        is_collision_flat = (values == self.bitmap.obstacle_value)
+        
+        return torch.any(is_collision_flat.view(batch_dim, -1), dim=1)
+
+    def get_oa_velocity(self, agent, agent_idx: int, original_velocity: Tensor) -> Tensor:
+        """
+        Checks the original velocity command for safety using a prioritized search.
+        If unsafe, it tries to find a safe alternative by first reducing lateral velocity,
+        then searching angular velocity, then reducing forward velocity.
+        """
+        # --- 0. Get Current State and Find the Bitmap Obstacle ---
+        
+        current_pos = agent.state.pos
+        current_rot = agent.state.rot
+        
+        # Initialize final velocities with the original command
+        final_vx = original_velocity[:, 0].clone()
+        final_vy = original_velocity[:, 1].clone()
+        final_w = original_velocity[:, 2].clone()
+
+        # --- Search Level 1: Check original velocity ---
+        original_traj = self._simulate_holonomic_trajectory(final_vx, final_vy, final_w)
+        is_unsafe = self._check_trajectory_collision(original_traj, current_pos, current_rot)
+        
+        # If all trajectories in the batch are safe, we are done
+        if not torch.any(is_unsafe):
+            return original_velocity
+
+        # --- Search Level 2: Try setting lateral velocity to zero ---
+        # Only for the environments that were unsafe
+        unsafe_indices = is_unsafe.nonzero(as_tuple=True)[0]
+        vy_zeroed = torch.zeros_like(final_vy[unsafe_indices])
+        
+        traj_vy_zeroed = self._simulate_holonomic_trajectory(final_vx[unsafe_indices], vy_zeroed, final_w[unsafe_indices])
+        is_still_unsafe_after_vy_zero = self._check_trajectory_collision(traj_vy_zeroed, current_pos[unsafe_indices], current_rot[unsafe_indices])
+        
+        # Update the velocities for those that are now safe
+        newly_safe_mask = ~is_still_unsafe_after_vy_zero
+        if newly_safe_mask.any():
+            indices_now_safe = unsafe_indices[newly_safe_mask]
+            final_vy[indices_now_safe] = 0.0
+            # Update the main `is_unsafe` mask
+            is_unsafe[indices_now_safe] = False
+        
+        if not torch.any(is_unsafe):
+            return torch.stack([final_vx, final_vy, final_w], dim=1)
+
+        # --- Search Level 3 & 4: Iteratively search angular and forward velocities ---
+        # We only need to search for the envs that are still unsafe
+        unsafe_indices = is_unsafe.nonzero(as_tuple=True)[0]
+        
+        # For these remaining unsafe trajectories, we will work with vy=0
+        vx_to_search = final_vx[unsafe_indices]
+        vy_to_search = torch.zeros_like(vx_to_search) # Lateral velocity is now zero
+        w_to_search = final_w[unsafe_indices]
+
+        found_safe_alternative = torch.zeros_like(unsafe_indices, dtype=torch.bool)
+        
+        # Velocity reduction steps (e.g., 100%, 75%, 50%)
+        vel_reduction_factors = torch.linspace(1.0, 0.25, self.OA_NUM_VELOCITY_SEARCH_STEPS, device=self.device)
+        angular_search_space = torch.linspace(0, self.OA_MAX_SPEED_YAW, self.OA_NUM_ANGULAR_SEARCH_STEPS, device=self.device)
+
+        for vel_factor in vel_reduction_factors:
+            if found_safe_alternative.all(): break
+            
+            current_vx_candidate = vx_to_search * vel_factor
+            
+            for i in range(1, self.OA_NUM_ANGULAR_SEARCH_STEPS):
+                if found_safe_alternative.all(): break
+                
+                for turn_direction in [1, -1]:
+                    if found_safe_alternative.all(): break
+                    
+                    indices_to_check = unsafe_indices[~found_safe_alternative]
+                    if indices_to_check.numel() == 0: break
+                    
+                    # Get the subset of velocities for the envs we are still trying to fix
+                    vx_subset = current_vx_candidate[~found_safe_alternative]
+                    vy_subset = vy_to_search[~found_safe_alternative]
+                    w_subset_original = w_to_search[~found_safe_alternative]
+
+                    w_candidate = w_subset_original + turn_direction * angular_search_space[i]
+                    w_candidate = torch.clamp(w_candidate, -self.OA_MAX_SPEED_YAW, self.OA_MAX_SPEED_YAW)
+
+                    candidate_traj = self._simulate_holonomic_trajectory(vx_subset, vy_subset, w_candidate)
+                    
+                    is_candidate_unsafe = self._check_trajectory_collision(
+                        candidate_traj, 
+                        current_pos[indices_to_check], 
+                        current_rot[indices_to_check]
+                    )
+                    
+                    newly_safe_mask = ~is_candidate_unsafe
+                    if newly_safe_mask.any():
+                        indices_of_newly_safe = indices_to_check[newly_safe_mask]
+                        # Update the final velocities for these envs
+                        final_vx[indices_of_newly_safe] = vx_subset[newly_safe_mask]
+                        final_vy[indices_of_newly_safe] = vy_subset[newly_safe_mask] # Stays 0
+                        final_w[indices_of_newly_safe] = w_candidate[newly_safe_mask]
+                        
+                        # Update the master `found_safe_alternative` mask
+                        temp_found_mask = torch.zeros_like(unsafe_indices, dtype=torch.bool)
+                        temp_found_mask[~found_safe_alternative] = newly_safe_mask
+                        found_safe_alternative |= temp_found_mask
+
+        # --- Search Level 5: Safety Stop ---
+        # For any trajectories that are still unsafe after all searches, stop the robot
+        still_unsafe_indices = unsafe_indices[~found_safe_alternative]
+        if still_unsafe_indices.numel() > 0:
+            final_vx[still_unsafe_indices] = 0.0
+            final_vy[still_unsafe_indices] = 0.0
+            final_w[still_unsafe_indices] = 0.0
+
+        return torch.stack([final_vx, final_vy, final_w], dim=1)
     
     def compute_agent_velocity(self, agent, agent_index):
         # Get the agent's current position (batch_size x 2)
@@ -5794,7 +6085,7 @@ class Scenario(BaseScenario):
         # optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2]
         # optimized_target_pose = torch.cat([optimized_target_pos, translated_agent_rot], dim=1)
         # print("optimized_target_pose:{}".format(optimized_target_pose.shape))
-        
+        env_type = self.get_forward_env_type()
         
         if current_agent_index == 0:
             opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=1)
@@ -5821,6 +6112,8 @@ class Scenario(BaseScenario):
                 "group_center_rew": agent.group_center_rew,
                 "collision_obstacle_rew": agent.collision_obstacle_rew,
                 "agent_pos_rew": agent.pos_rew,
+                "env_type": env_type,
+
             }
         else:
             return {

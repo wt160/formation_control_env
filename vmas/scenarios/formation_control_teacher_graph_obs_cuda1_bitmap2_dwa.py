@@ -531,6 +531,16 @@ class Scenario(BaseScenario):
         self.precompute_evaluation_scene(self.env_type)
 
 
+        self.OA_PREDICT_TIME = 0.7              # seconds, how far to look ahead
+        self.OA_SIMULATION_TIMESTEP = 0.1       # seconds, resolution of the simulated path
+        self.OA_ROBOT_RADIUS = 0.25             # meters, for collision checking
+        self.OA_NUM_ANGULAR_SEARCH_STEPS = 10   # Number of alternative angles to check on each side (left/right)
+        
+        # --- Robot Dynamic Constraints ---
+        self.OA_MAX_SPEED_X = 0.5  # m/s
+        self.OA_MAX_SPEED_Y = 0.3  # m/s
+        self.OA_MAX_SPEED_YAW = 1.0 # rad/s
+
         return world
 
     def load_map(self, file_path: str, obstacle_threshold: int = 128) -> torch.Tensor:
@@ -3394,7 +3404,7 @@ class Scenario(BaseScenario):
                 
                 # If path found, simplify it and convert back to world coordinates
                 if path:
-                    if self._is_path_near_obstacles(path, bitmap, check_radius_pixels=50, min_near_points_ratio=0.03):
+                    if self._is_path_near_obstacles(path, bitmap, check_radius_pixels=30, min_near_points_ratio=0.03):
                         # Simplify path (remove unnecessary waypoints)
                         simplified_path = self._simplify_path(path, bitmap, agent_radius / scale)
                         
@@ -3787,6 +3797,180 @@ class Scenario(BaseScenario):
         return torch.atan2(torch.sin(angle), torch.cos(angle))
 
 
+    def _simulate_holonomic_trajectory(self, vx: Tensor, vy: Tensor, w: Tensor) -> Tensor:
+        """
+        Simulates a short trajectory for a holonomic robot given a velocity command.
+        
+        Args:
+            vx, vy, w (Tensor): Tensors of shape [batch_dim] for linear and angular velocities.
+        
+        Returns:
+            Tensor: Simulated trajectory points of shape [batch_dim, num_sim_steps, 2]
+                    in the robot's local frame.
+        """
+        batch_dim = vx.shape[0]
+        num_sim_steps = int(self.OA_PREDICT_TIME / self.OA_SIMULATION_TIMESTEP)
+        
+        # Initialize trajectory points at the origin (robot's local frame)
+        trajectory = torch.zeros(batch_dim, num_sim_steps, 2, device=self.device)
+        
+        # Initial local pose is (0, 0, 0)
+        x = torch.zeros(batch_dim, device=self.device)
+        y = torch.zeros(batch_dim, device=self.device)
+        theta = torch.zeros(batch_dim, device=self.device)
+
+        for t in range(num_sim_steps):
+            # For a holonomic robot, vx and vy are directly in the local frame
+            x += vx * self.OA_SIMULATION_TIMESTEP
+            y += vy * self.OA_SIMULATION_TIMESTEP
+            # Note: For a diff-drive robot, this would be different:
+            # theta += w * self.OA_SIMULATION_TIMESTEP
+            # x += vx * torch.cos(theta) * self.OA_SIMULATION_TIMESTEP
+            # y += vx * torch.sin(theta) * self.OA_SIMULATION_TIMESTEP
+            
+            trajectory[:, t, 0] = x
+            trajectory[:, t, 1] = y
+            
+        return trajectory
+
+    def _check_trajectory_collision(self, trajectory: Tensor, lidar_scan: dict) -> Tensor:
+        """
+        Checks if any point on a simulated trajectory collides with LiDAR-detected obstacles.
+
+        Args:
+            trajectory (Tensor): Shape [batch_dim, num_sim_steps, 2] of local path points.
+            lidar_scan (dict): A dictionary containing 'ranges' and 'angles' tensors.
+                               'ranges': [batch_dim, num_rays]
+                               'angles': [batch_dim, num_rays]
+
+        Returns:
+            Tensor: A boolean tensor of shape [batch_dim] where True indicates a collision.
+        """
+        batch_dim, num_sim_steps, _ = trajectory.shape
+        
+        # Calculate distance and angle for each point on the trajectory
+        traj_dists = torch.norm(trajectory, dim=2) # Shape: [batch_dim, num_sim_steps]
+        traj_angles = torch.atan2(trajectory[:, :, 1], trajectory[:, :, 0]) # Shape: [batch_dim, num_sim_steps]
+
+        # Find the closest LiDAR ray for each trajectory point
+        # Unsqueeze to prepare for broadcasting:
+        # lidar_angles -> [batch_dim, 1, num_rays]
+        # traj_angles -> [batch_dim, num_sim_steps, 1]
+        angle_diff = torch.abs(self._normalize_angle(lidar_scan['angles'].unsqueeze(1) - traj_angles.unsqueeze(2)))
+        _, closest_ray_indices = torch.min(angle_diff, dim=2) # Shape: [batch_dim, num_sim_steps]
+
+        # Get the LiDAR distance reading for the corresponding closest ray
+        lidar_dist_for_traj_points = torch.gather(lidar_scan['ranges'], 1, closest_ray_indices)
+        
+        # A collision occurs if the distance to a trajectory point is greater than
+        # the LiDAR reading for that direction, minus the robot's radius.
+        is_collision = traj_dists > (lidar_dist_for_traj_points - self.OA_ROBOT_RADIUS)
+        
+        # Return True for any batch instance if any point on its trajectory is in collision
+        return torch.any(is_collision, dim=1) # Shape: [batch_dim]
+
+    def get_oa_velocity(self, agent, agent_idx: int, original_velocity: Tensor) -> Tensor:
+        """
+        Checks the original velocity command for safety. If unsafe, it searches for a safe
+        alternative by modifying the angular velocity.
+
+        Args:
+            agent: The agent object.
+            agent_idx (int): The index of the follower agent.
+            original_velocity (Tensor): The desired velocity [vx, vy, vyaw] from the high-level
+                                        policy. Shape: [batch_dim, 3].
+
+        Returns:
+            Tensor: A safe velocity command of shape [batch_dim, 3].
+        """
+        # --- 0. Get Sensor Data ---
+        lidar_scan = {
+            'ranges': agent.sensors[0].measure(),
+            'angles': agent.sensors[0]._angles
+        }
+        
+        # --- 1. Check if the original command is safe ---
+        original_vx = original_velocity[:, 0]
+        original_vy = original_velocity[:, 1]
+        original_w = original_velocity[:, 2]
+
+        original_traj = self._simulate_holonomic_trajectory(original_vx, original_vy, original_w)
+        is_original_unsafe = self._check_trajectory_collision(original_traj, lidar_scan)
+
+        # Initialize final velocities with the original command
+        final_vx = original_vx.clone()
+        final_vy = original_vy.clone()
+        final_w = original_w.clone()
+
+        # If all trajectories in the batch are safe, we are done
+        if not torch.any(is_original_unsafe):
+            return torch.stack([final_vx, final_vy, final_w], dim=1)
+
+        # --- 2. Search for a safe velocity for the unsafe trajectories ---
+        # Only perform search for the batch elements that were found to be unsafe
+        unsafe_indices = is_original_unsafe.nonzero(as_tuple=True)[0]
+        
+        if unsafe_indices.numel() > 0:
+            best_w_found = final_w[unsafe_indices].clone() # Start with original w
+            found_safe_alternative = torch.zeros_like(unsafe_indices, dtype=torch.bool)
+
+            # Generate angular velocity candidates to search
+            angular_search_space = torch.linspace(0, self.OA_MAX_SPEED_YAW, self.OA_NUM_ANGULAR_SEARCH_STEPS, device=self.device)
+
+            for i in range(1, self.OA_NUM_ANGULAR_SEARCH_STEPS):
+                # Check turning left and right with increasing intensity
+                for turn_direction in [1, -1]: # 1 for left (positive w), -1 for right
+                    if found_safe_alternative.all(): break # Stop if all unsafe paths have found a solution
+
+                    # Consider only rays that haven't found a solution yet
+                    indices_to_check = unsafe_indices[~found_safe_alternative]
+                    
+                    if indices_to_check.numel() == 0: break
+
+                    # Create new candidate angular velocity
+                    w_candidate = original_w[indices_to_check] + turn_direction * angular_search_space[i]
+                    w_candidate = torch.clamp(w_candidate, -self.OA_MAX_SPEED_YAW, self.OA_MAX_SPEED_YAW)
+
+                    # Simulate and check this new trajectory
+                    candidate_traj = self._simulate_holonomic_trajectory(
+                        original_vx[indices_to_check], 
+                        original_vy[indices_to_check], 
+                        w_candidate
+                    )
+                    
+                    # We need to provide the lidar scan for only the environments we are checking
+                    lidar_subset = {
+                        'ranges': lidar_scan['ranges'][indices_to_check],
+                        'angles': lidar_scan['angles'][indices_to_check]
+                    }
+                    is_candidate_unsafe = self._check_trajectory_collision(candidate_traj, lidar_subset)
+                    
+                    # For the candidates that are now safe, update our best velocity and mark as found
+                    newly_safe_mask = ~is_candidate_unsafe
+                    if newly_safe_mask.any():
+                        indices_of_newly_safe = indices_to_check[newly_safe_mask]
+                        final_w[indices_of_newly_safe] = w_candidate[newly_safe_mask]
+                        
+                        # Update the 'found_safe_alternative' mask
+                        # This requires careful indexing to map back from the subset to the original `unsafe_indices`
+                        # A simpler way is to iterate, but for vectorization:
+                        # Create a full-size mask and update it
+                        temp_found_mask = torch.zeros_like(unsafe_indices, dtype=torch.bool)
+                        temp_found_mask[~found_safe_alternative] = newly_safe_mask
+                        found_safe_alternative |= temp_found_mask
+
+
+                if found_safe_alternative.all(): break
+            
+            # For any trajectories that are still unsafe after the search, stop the robot
+            still_unsafe_indices = unsafe_indices[~found_safe_alternative]
+            if still_unsafe_indices.numel() > 0:
+                final_vx[still_unsafe_indices] = 0.0
+                final_vy[still_unsafe_indices] = 0.0
+                final_w[still_unsafe_indices] = 0.0
+
+        return torch.stack([final_vx, final_vy, final_w], dim=1)
+
     def get_apf_velocity(self, agent, agent_idx: int, last_velocity_command: Tensor) -> Tensor:
         """
         Computes the optimal velocity command (vx, vy, vyaw) for a holonomic agent
@@ -3804,8 +3988,8 @@ class Scenario(BaseScenario):
         """
 
 
-        self.APF_ATTRACTIVE_GAIN = 5.0              # Scaling factor for pull towards the goal
-        self.APF_REPULSIVE_GAIN = 7.6               # Scaling factor for push from obstacles
+        self.APF_ATTRACTIVE_GAIN = 7.0              # Scaling factor for pull towards the goal
+        self.APF_REPULSIVE_GAIN = 4.6               # Scaling factor for push from obstacles
         self.APF_OBSTACLE_INFLUENCE_RADIUS = 0.5    # Distance (m) at which obstacles start exerting a force
         self.APF_GOAL_TOLERANCE = 0.03              # Distance (m) to the goal to stop linear motion
         

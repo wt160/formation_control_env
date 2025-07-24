@@ -95,6 +95,10 @@ class Environment(TorchVectorizedObject):
         leader_paths = self.scenario.get_leader_paths()
         return leader_paths
 
+    def get_forward_env_type(self):
+        forward_env_type = self.scenario.get_forward_env_type()
+        return forward_env_type
+
     def reset(
         self,
         seed: Optional[int] = None,
