@@ -1093,7 +1093,7 @@ def main(args):
         epoch_obs_data_list = [] # This will be a flat list of Data objects
         epoch_forward_opening_list = []
         epoch_run_rewards_log = [] # For logging mean re
-
+        epoch_context_list = []
 
 
         obs_storage = []
@@ -1112,8 +1112,7 @@ def main(args):
         epoch_agent_target_collision_rewards = []
         epoch_agent_pos_rewards = []
 
-
-
+        forward_env_type = torch.zeros(args.num_envs, device=device, dtype=torch.long)
         # obs = env.reset()  # [num_envs, n_agents, obs_dim]
         for epoch_restart_idx in range(epoch_restart_num):
             env = VMASWrapper(
@@ -1162,7 +1161,14 @@ def main(args):
                     # batch_obs = batch_obs.to(device)
                     if args.has_laser == True:
                         # action_mean, action_std = clutter_actor_model(batched_obs_for_gnn) 
-
+                        # if forward_env_type[0].item() == 0:
+                        #     eval_action_mean, _, _, _ = empty_actor_model(eval_batched_obs)
+                        # elif forward_env_type[0].item() == 1:
+                        #     eval_action_mean, _, _, _ = clutter_actor_model(eval_batched_obs)
+                        # elif forward_env_type[0].item() == 2:
+                        #     eval_action_mean, _, _, _ = tunnel_transform_actor_model(eval_batched_obs)
+                        # elif forward_env_type[0].item() == 3:
+                        #     eval_action_mean, _, _, _ = tunnel_actor_model(eval_batched_obs)    
                         action_mean, action_std ,_, _ = clutter_actor_model(batched_obs_for_gnn)  # Now returns action_std
                     else:
                         action_mean, action_std = clutter_actor_model(batched_obs_for_gnn) 
@@ -1213,7 +1219,12 @@ def main(args):
                     env.step(action_for_env_step, done_override=done_override_max_steps)
                 
                 # next_obs, rewards, dones, infos = env.step(list_of_agent_actions, done_override=done_override)
-
+                forward_env_type = infos[0]["env_type"]
+                epoch_context_list.append(forward_env_type)
+                # if forward_env_type[0].item() == 0:
+                #     eval_action_mean, _, _, _ = empty_actor_model(eval_batched_obs)
+                # elif forward_env_type[0].item() == 1:
+                #     eval_action_mean, _, _, _ = clutter_actor_model(eval_batched_obs)
                 restart_rewards.append(rewards_per_env)
                 restart_dones.append(dones_per_env)
 
@@ -1269,6 +1280,8 @@ def main(args):
         values_tensor = torch.cat(epoch_values_list, dim=0)
         rewards_tensor = torch.cat(epoch_rewards_list, dim=0)
         dones_tensor = torch.cat(epoch_dones_list, dim=0)
+        contexts_tensor = torch.stack(epoch_context_list, dim=0) # NEW
+
                 # for env_idx in range(batch_size):
                 #     # if dones[env_idx] == False:
                 #     # if desired_mask[env_idx]:
@@ -1373,6 +1386,7 @@ def main(args):
         actions_flat = actions_tensor.reshape(-1, num_agents, action_dim)
         log_probs_flat = log_probs_tensor.reshape(-1, num_agents)
         returns_flat = returns_batch_per_env.reshape(-1)
+        contexts_flat = contexts_tensor.view(-1) # NEW
         # epoch_obs_data_list is already flat list of Data objects, length = total_transitions
 
         num_total_transitions = len(epoch_obs_data_list)
@@ -1380,18 +1394,27 @@ def main(args):
 
         
         
-        
+        TARGET_CONTEXT_LABEL = 1 
+        print("contexts:{}".format(contexts_flat))
+        context_specific_indices = (contexts_flat == TARGET_CONTEXT_LABEL).nonzero(as_tuple=True)[0]
+        num_context_transitions = context_specific_indices.shape[0]
+        swanlab.log({'Training/Number of clutter':num_context_transitions}, step=epoch)
+        if num_context_transitions == 0:
+            print(f"Epoch {epoch+1}: No transitions found for target context {TARGET_CONTEXT_LABEL}. Skipping PPO update.")
+            continue
+
         # PPO update
         # print("num_total_transitions :{}".format(num_total_transitions))
         for _ in range(ppo_epochs):
-            permutation_indices = torch.randperm(num_total_transitions, device=device)
-            for start_idx in range(0, num_total_transitions, mini_batch_size_graphs):
-                end_idx = min(start_idx + mini_batch_size_graphs, num_total_transitions)
+            permutation = context_specific_indices[torch.randperm(num_context_transitions, device=device)]
+            
+            for start_idx in range(0, num_context_transitions, mini_batch_size_graphs):
+                end_idx = min(start_idx + mini_batch_size_graphs, num_context_transitions)
                 if end_idx - start_idx < 8 : # Skip very small minibatches
                     continue
                 
-                mb_indices = permutation_indices[start_idx:end_idx]
-
+                # mb_indices = permutation_indices[start_idx:end_idx]
+                mb_indices = permutation[start_idx:end_idx]
 
                 # print("epoch_forward_opening length:{}".format(len(epoch_forward_opening_list)))
                 # Create minibatch of Data objects
@@ -1622,13 +1645,13 @@ def main(args):
             #     else:
             #         print("why?")
 
-            # if curriculum_transition_return_mean > 4000.0 and steps_per_epoch == 100:
-            #     steps_per_epoch = 200
-            #     eval_steps_per_episode = 200
-            # elif curriculum_transition_return_mean > 4000.0 and steps_per_epoch == 200:
-            #     steps_per_epoch = 300
-            #     eval_steps_per_episode = 300
-            swanlab.log({'Evaluation/steps_per_epoch': steps_per_epoch}, step=epoch)
+                if curriculum_transition_return_mean > 4000.0 and steps_per_epoch == 100:
+                    steps_per_epoch = 200
+                    eval_steps_per_episode = 200
+                elif curriculum_transition_return_mean > 4000.0 and steps_per_epoch == 200:
+                    steps_per_epoch = 300
+                    eval_steps_per_episode = 300
+                swanlab.log({'Evaluation/steps_per_epoch': steps_per_epoch}, step=epoch)
             clutter_actor_model.train()
             critic_model.train()
 

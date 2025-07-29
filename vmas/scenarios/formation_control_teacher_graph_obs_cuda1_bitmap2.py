@@ -552,17 +552,14 @@ class Scenario(BaseScenario):
         self.OA_NUM_ANGULAR_SEARCH_STEPS = 10   # Number of alternative angles to check on each side (left/right)
         
         # --- Robot Dynamic Constraints ---
-        self.OA_MAX_SPEED_X = 0.7  # m/s
-        self.OA_MAX_SPEED_Y = 0.2  # m/s
-        self.OA_MAX_SPEED_YAW = 0.6 # rad/s
+        self.OA_MAX_SPEED_X = 1.2  # m/s
+        self.OA_MAX_SPEED_Y = 0.5  # m/s
+        self.OA_MAX_SPEED_YAW = 1.0 # rad/s
         self.footprint_local = self._get_robot_footprint()
         self.OA_PREDICT_TIME = 0.7              # seconds, how far to look ahead
         self.OA_NUM_VELOCITY_SEARCH_STEPS = 3   # Number of steps to reduce forward velocity
         
-        # --- Robot Dynamic Constraints ---
-        self.OA_MAX_SPEED_X = 0.5  # m/s
-        self.OA_MAX_SPEED_Y = 0.3  # m/s
-        self.OA_MAX_SPEED_YAW = 1.0 # rad/s
+     
 
         return world
 
@@ -3416,8 +3413,8 @@ class Scenario(BaseScenario):
     def get_forward_env_type(self):
         instantaneous_env_type = torch.ones(self.batch_dim, device=self.device, dtype=torch.long)
 
-        is_wide_open = (self.smoothed_left_opening > 1.1) & (self.smoothed_right_opening > 1.1)
-        is_narrow = (self.smoothed_left_opening < 0.6) & (self.smoothed_right_opening < 0.6)
+        is_wide_open = (self.smoothed_left_opening > 0.75) & (self.smoothed_right_opening > 0.75)
+        is_narrow = (self.smoothed_left_opening < 0.2) & (self.smoothed_right_opening < 0.2)
 
         instantaneous_env_type[is_wide_open] = 0
         instantaneous_env_type[is_narrow] = 2
@@ -3512,17 +3509,17 @@ class Scenario(BaseScenario):
 
             inflation_radius = 0.0
             if self.train_map_directory == "train_maps_0_clutter":
-                inflation_radius = 3.0
+                inflation_radius = 5.0
             elif self.train_map_directory == "train_maps_1_clutter":
-                inflation_radius = 2.5
+                inflation_radius = 4.0
             elif self.train_map_directory == "train_maps_2_clutter":
-                inflation_radius = 2.5
+                inflation_radius = 3.5
             elif self.train_map_directory == "train_maps_3_clutter":
-                inflation_radius = 2.5
+                inflation_radius = 3.0
             elif self.train_map_directory == "train_maps_4_clutter":
                 inflation_radius = 2.0
             elif self.train_map_directory == "train_maps_5_clutter":
-                inflation_radius = 0.5
+                inflation_radius = 1.5
 
             if self.train_map_directory == "train_maps_0_test":
                 inflation_radius = 3.0
@@ -3569,8 +3566,8 @@ class Scenario(BaseScenario):
                         target_x = random.randint(0, bitmap_width - 1)
                         target_y = random.randint(0, bitmap_height - 1)
 
-                    # if target_x > int(bitmap_width / 3.0) and target_x < int(bitmap_width / 3.0 * 2.0) and target_y > int(bitmap_height / 3.0) and target_y < int(bitmap_height / 3.0 * 2.0):
-                    #     continue
+                    if target_x > int(bitmap_width / 3.0) and target_x < int(bitmap_width / 3.0 * 2.0) and target_y > int(bitmap_height / 3.0) and target_y < int(bitmap_height / 3.0 * 2.0):
+                        continue
                     # if random.random() < 0.5:
                     #     target_x = random.randint(0, int(bitmap_width / 3.0))
                     # else:
@@ -3641,11 +3638,11 @@ class Scenario(BaseScenario):
         # print("batch_leader_paths size:{}".format(len(self.batch_leader_paths)))
         for dim in range(self.batch_dim):
             # print("dim:{}".format(dim))
-            init_direction = self.compute_leader_init_direction(self.batch_leader_paths[dim])
-            # start_index, init_x, init_y, init_direction = self.find_random_leader_starting_point(dim, self.batch_leader_paths[dim])
-            self.reset_world_at_with_init_direction(dim, init_direction)
-            # self.reset_world_at_with_init_pose(dim, init_x, init_y, init_direction)
-            # self.batch_leader_paths[dim] = self.batch_leader_paths[dim][start_index:]
+            # init_direction = self.compute_leader_init_direction(self.batch_leader_paths[dim])
+            start_index, init_x, init_y, init_direction = self.find_random_leader_starting_point(dim, self.batch_leader_paths[dim])
+            # self.reset_world_at_with_init_direction(dim, init_direction)
+            self.reset_world_at_with_init_pose(dim, init_x, init_y, init_direction)
+            self.batch_leader_paths[dim] = self.batch_leader_paths[dim][start_index:]
         return self.batch_leader_paths
     
 
@@ -3662,9 +3659,9 @@ class Scenario(BaseScenario):
         check_start_index = 0
         while trial_index < num_trials:
             if path_length > 60:
-                check_start_index = np.random.randint(1, path_length - 30)
+                check_start_index = np.random.randint(1, 30)
             else:
-                check_start_index = 0
+                check_start_index = 10
             is_free, init_x, init_y, init_direction = self.check_formation_free(dim, world_path, check_start_index)
             if is_free:
                 return check_start_index, init_x, init_y, init_direction
@@ -4007,21 +4004,21 @@ class Scenario(BaseScenario):
                 ang_vel[env_idx] = angular_gain * angle_diff
                 
                 # Set linear velocity based on distance and angle alignment
-                max_speed = 0.5  # Maximum speed
+                max_speed = 0.4  # Maximum speed
                 
                 # Reduce speed when not well-aligned with the target
                 alignment_factor = torch.cos(angle_diff)
-                alignment_factor = torch.clamp(alignment_factor, 0.6, 1.0)  # Between 0.3 and 1
+                alignment_factor = torch.clamp(alignment_factor, 0.3, 1.0)  # Between 0.3 and 1
                 
                 # When the angle difference is large, focus on turning first
                 if abs(angle_diff) > 0.5:  # About 30 degrees
-                    speed = max_speed * 0.5  # Move slower when turning sharply
+                    speed = max_speed * 0.3  # Move slower when turning sharply
                 else:
                     speed = max_speed * alignment_factor
-                # random_factor = random.random()
+                random_factor = random.random()
                 # Set velocity components in world frame
-                vel_x[env_idx] = speed * torch.cos(leader_rot + angle_diff * 0.5)
-                vel_y[env_idx] = speed * torch.sin(leader_rot + angle_diff * 0.5)
+                vel_x[env_idx] = speed * random_factor * torch.cos(leader_rot + angle_diff * 0.5)
+                vel_y[env_idx] = speed * random_factor * torch.sin(leader_rot + angle_diff * 0.5)
                 
                 # vel_x[env_idx] = 0.01
                 # vel_y[env_idx] = 0.0
@@ -4248,8 +4245,8 @@ class Scenario(BaseScenario):
                         elif self.working_mode == "RL":
                             # agent.state.force = 2*(agent.action.u[:, :2] - agent.state.vel[:, :2])
                             # agent.state.torque = agent.action.u[:, 2].unsqueeze(-1) - agent.state.ang_vel[:, :1]
-                            p_gain_pos = 5.0
-                            p_gain_rot = 1.5
+                            p_gain_pos = 2.5
+                            p_gain_rot = 2.0
                             
                             # Get the error between the current pose and the high-level goal pose
                             pos_error_x = self.formation_goals[i][:, 0] - agent.state.pos[:, 0]
@@ -4271,10 +4268,10 @@ class Scenario(BaseScenario):
                             # This is the realistic velocity command that the high-level policy "wants"
                             original_velocity_clamped = torch.stack([vx_clamped, vy_clamped, w_clamped], dim=-1)
 
-                            oa_velocity = self.get_oa_velocity(agent, i, original_velocity_clamped)
+                            # oa_velocity = self.get_oa_velocity(agent, i, original_velocity_clamped)
                             
                             agent.set_vel(
-                                   oa_velocity[:, :2],
+                                   original_velocity_clamped[:, :2],
                                 batch_index=None,
                             )
                             # print("dwa vel:{}".format(apf_vel.shape))
@@ -4283,12 +4280,12 @@ class Scenario(BaseScenario):
                         # batch_index=None,
                         #     )       
                             agent.set_ang_vel(
-                                oa_velocity[:, 2].unsqueeze(dim=-1),
+                                original_velocity_clamped[:, 2].unsqueeze(dim=-1),
                         batch_index=None,
                             )       
                             # agent.set_vel(
-                                    # torch.stack([3*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 3*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
-                                # batch_index=None,
+                            #         torch.stack([3*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 3*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
+                            #     batch_index=None,
                             # )
                         elif self.working_mode == "potential_field":
                             agent.set_vel(
@@ -5802,8 +5799,8 @@ class Scenario(BaseScenario):
 
         agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
         if self.env_type == "bitmap":
-            pass
-            # agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
+            # pass
+            agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
         if is_first:
             # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
             return agent.target_collision_rew
@@ -5876,7 +5873,8 @@ class Scenario(BaseScenario):
             #     rewards_setup2,       # Value if condition is True
             #     rewards_setup1        # Value if condition is False
             # ) 
-            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew
+            # return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew + agent.pos_rew
+            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew 
             
             # return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew + agent.collision_obstacle_rew
 
@@ -6132,8 +6130,8 @@ class Scenario(BaseScenario):
         left_opening_y = torch.clamp(left_opening_y, 0, max_half_opening_width)
 
         print("left_opening_y:{}".format(left_opening_y))
-        left_opening_y = left_opening_y - 0.7
-        print("left_opening_y after minus0.7:{}".format(left_opening_y))
+        # left_opening_y = left_opening_y - 0.7
+        # print("left_opening_y after minus0.7:{}".format(left_opening_y))
         left_opening_y = torch.where(
              (left_opening_y < 0), # If no valid left obstacle or y became negative
             torch.full_like(left_opening_y, 0.01),
@@ -6160,7 +6158,7 @@ class Scenario(BaseScenario):
             right_opening_y
         )
         right_opening_y = torch.clamp(right_opening_y, -max_half_opening_width, 0)
-        right_opening_y = right_opening_y + 0.7
+        # right_opening_y = right_opening_y + 0.7
         right_opening_y = torch.where(
              (right_opening_y > 0), # If no valid left obstacle or y became negative
             torch.full_like(right_opening_y, -0.01),

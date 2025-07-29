@@ -3,7 +3,7 @@ import time
 import os
 
 # Script to run (must be executable and in PATH or provide full path)
-TRAINING_SCRIPT = "ppo_train_bitmap_new.py" # Or "python ppo_train_bitmap.py" if not executable
+TRAINING_SCRIPT = "ppo_train_bitmap_new_context.py" # Or "python ppo_train_bitmap.py" if not executable
 
 # --- Define Experiment Configurations ---
 # Each dictionary contains the arguments for one run of ppo_train_bitmap.py
@@ -14,11 +14,11 @@ experiment_configurations = [
         "train_env_type": "bitmap",
         # "policy_filename": "ppo_bitmap_clutter.pth", # Optional: if you have one
         # "critic_filename": "ppo_bitmap_clutter_critic.pth", 
-        "policy_filename": "", # Optional: if you have one
-        "critic_filename": "", 
-        "output_policy_filename": "ppo_bitmap_clutter_100_random_start.pth",
-        "output_critic_filename": "ppo_bitmap_clutter_critic_100_random_start.pth",
-        "steps_per_epoch": 100,
+        "policy_filename": "ppo_bitmap_empty_200_origin_start.pth", # Optional: if you have one
+        "critic_filename": "ppo_bitmap_empty_critic_200_origin_start.pth", 
+        "output_policy_filename": "ppo_bitmap_clutter_200_origin_start.pth",
+        "output_critic_filename": "ppo_bitmap_clutter_critic_200_origin_start.pth",
+        "steps_per_epoch": 200,
         "epochs": 50000, # Shorter for example
         "device": "cpu", # Assign specific GPU if available
         "learning_rate": 3e-4,
@@ -28,7 +28,7 @@ experiment_configurations = [
         "num_envs": 20,
         "seed": 0,
         "has_laser": True,
-        "train_map_directory": "train_maps_2_clutter",
+        "train_map_directory": "train_maps_1_clutter",
         "use_leader_laser_only": False,
     },
     # {5_rwc-0.8_seed1",
