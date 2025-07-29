@@ -3413,8 +3413,8 @@ class Scenario(BaseScenario):
     def get_forward_env_type(self):
         instantaneous_env_type = torch.ones(self.batch_dim, device=self.device, dtype=torch.long)
 
-        is_wide_open = (self.smoothed_left_opening > 0.75) & (self.smoothed_right_opening > 0.75)
-        is_narrow = (self.smoothed_left_opening < 0.2) & (self.smoothed_right_opening < 0.2)
+        is_wide_open = (self.smoothed_left_opening > 1.85) & (self.smoothed_right_opening > 1.85)
+        is_narrow = (self.smoothed_left_opening < 0.3) & (self.smoothed_right_opening < 0.3)
 
         instantaneous_env_type[is_wide_open] = 0
         instantaneous_env_type[is_narrow] = 2
@@ -3609,9 +3609,9 @@ class Scenario(BaseScenario):
                     world_path = []
                     path_idx = 0
                     for y, x in path:
-                        if path_idx > 10:
-                            world_x = x * self.scale + self.origin[0] - 0.03 +  random.random()*0.06
-                            world_y = y * self.scale + self.origin[1] - 0.03 +  random.random()*0.06
+                        if path_idx > 3:
+                            world_x = x * self.scale + self.origin[0] - 0.05 +  random.random()*0.1
+                            world_y = y * self.scale + self.origin[1] - 0.05 +  random.random()*0.1
                         else:
                             world_x = x * self.scale + self.origin[0] 
                             world_y = y * self.scale + self.origin[1] 
@@ -3659,7 +3659,7 @@ class Scenario(BaseScenario):
         check_start_index = 0
         while trial_index < num_trials:
             if path_length > 60:
-                check_start_index = np.random.randint(1, 30)
+                check_start_index = np.random.randint(10, 30)
             else:
                 check_start_index = 10
             is_free, init_x, init_y, init_direction = self.check_formation_free(dim, world_path, check_start_index)
@@ -6230,7 +6230,7 @@ class Scenario(BaseScenario):
                 # print("angles:{}".format(agent.sensors[0]._angles ))
                 # self.left_opening, self.right_opening = self.compute_lidar_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 3.5, torch.pi*9.0/10.0)
             # print("lidar_observation_tensor :{}".format(self.current_lidar_reading.shape))
-                self.smoothed_left_opening, self.smoothed_right_opening = self.update_and_get_smoothed_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 3.5, torch.pi*9.0/10.0)
+                self.smoothed_left_opening, self.smoothed_right_opening = self.update_and_get_smoothed_opening(raw_lidar_reading, agent.sensors[0]._angles, 2.0, 2.49, torch.pi*9.0/10.0)
                 print("left open:{}, right open:{}".format(self.smoothed_left_opening, self.smoothed_right_opening))
         # Define feature_length:
         # - Node features: max_nodes * num_node_features

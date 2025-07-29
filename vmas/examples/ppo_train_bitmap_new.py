@@ -690,19 +690,21 @@ class GATActorWithLaser(nn.Module):
         self.conv1 = GATConv(gnn_input_channels, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
         self.conv3 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, edge_dim=1, fill_value='mean')
-        # self.gnn_output_dim = hidden_channels * 8
         self.gnn_output_dim = hidden_channels * 8
 
         self.pool = global_mean_pool
 
         # --- 3. Actor Head (processes GNN output) ---
-        # Input is now simpler: just the GNN's agent embedding and the global graph embedding
         actor_head_input_dim = self.gnn_output_dim * 2 # Agent GNN emb + Global GNN emb
         self.fc1 = nn.Sequential(
             nn.Linear(actor_head_input_dim, hidden_channels * 4),
             nn.ReLU()
         )
-        self.fc2 = nn.Linear(hidden_channels * 4, action_dim * 2)
+        
+        # --- MODIFICATION: Separated final layers for mean and std ---
+        self.fc2_mean = nn.Linear(hidden_channels * 4, action_dim)
+        self.fc2_std = nn.Linear(hidden_channels * 4, action_dim)
+        # --- END MODIFICATION ---
 
         # Action limits
         limits_tensor = torch.tensor([x_limit, y_limit, theta_limit], dtype=torch.float32)
@@ -718,11 +720,9 @@ class GATActorWithLaser(nn.Module):
 
         # --- Step B: Process LiDAR stream to get embedding ---
         processed_lidar_features = self.lidar_encoder_cnn(raw_lidar.unsqueeze(1))
-        # Also get reconstruction for the auxiliary loss
         reconstructed_lidar = self.lidar_decoder_mlp(processed_lidar_features)
 
         # --- Step C: Early Fusion ---
-        # Concatenate all node features to create the input for the GNN
         x_for_gnn = torch.cat([non_lidar_features, processed_lidar_features, last_action], dim=1)
 
         # --- Step D: Process Fused Features through GNN ---
@@ -730,10 +730,8 @@ class GATActorWithLaser(nn.Module):
         x_gnn = F.relu(x_gnn)
         x_gnn = F.relu(self.conv2(x_gnn, edge_index, edge_attr if edge_attr is not None else None))
         x_gnn = self.conv3(x_gnn, edge_index, edge_attr if edge_attr is not None else None)
-
         node_gnn_embeddings = F.relu(x_gnn)
         
-        # Global graph embedding from the GNN
         global_gnn_embedding = self.pool(node_gnn_embeddings, batch_map)
 
         # --- Step E: Actor Head ---
@@ -743,26 +741,29 @@ class GATActorWithLaser(nn.Module):
         combined_for_actor_head = torch.cat([agent_gnn_embeddings, graph_embedding_repeated], dim=1)
         
         actor_hidden = self.fc1(combined_for_actor_head)
-        mean_and_std_params = self.fc2(actor_hidden)
         
-        # ... (rest of the action generation logic is the same)
-        action_mean_raw, action_std_raw_params = torch.chunk(mean_and_std_params, 2, dim=-1)
+        # --- MODIFICATION: Use the separated heads ---
+        action_mean_raw = self.fc2_mean(actor_hidden)
+        action_std_raw_params = self.fc2_std(actor_hidden)
+        # --- END MODIFICATION ---
+        
+        # Process outputs to get valid mean and std
         action_mean_tanh = torch.tanh(action_mean_raw)
         action_mean_scaled = action_mean_tanh * self.action_limits
         min_std_val, max_std_val = 0.01, 0.3
         std_output_scaled = torch.sigmoid(action_std_raw_params)
         action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val) + 1e-5
+        
         action_mean = action_mean_scaled.view(data.num_graphs, self.num_agents, -1)
         action_std = action_std_processed.view(data.num_graphs, self.num_agents, -1)
         
-        # Get original and reconstructed lidar for agent nodes for the loss function
+        # Get original and reconstructed lidar for the loss function
         raw_lidar_for_agents = self.extract_agent_embeddings(raw_lidar, batch_map, data.num_graphs)
         reconstructed_lidar_for_agents = self.extract_agent_embeddings(reconstructed_lidar, batch_map, data.num_graphs)
 
         return action_mean, action_std, raw_lidar_for_agents, reconstructed_lidar_for_agents
 
     def extract_agent_embeddings(self, x, batch, batch_size):
-        # Your existing implementation
         agent_node_indices = []
         for graph_idx in range(batch_size):
             node_indices = (batch == graph_idx).nonzero(as_tuple=True)[0]
@@ -770,6 +771,7 @@ class GATActorWithLaser(nn.Module):
             agent_node_indices.append(agent_nodes)
         agent_node_indices = torch.cat(agent_node_indices, dim=0)
         return x[agent_node_indices]
+
 
 
 class GATCriticWithLaser(nn.Module):
