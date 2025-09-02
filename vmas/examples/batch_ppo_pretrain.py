@@ -3,22 +3,24 @@ import time
 import os
 
 # Script to run (must be executable and in PATH or provide full path)
-TRAINING_SCRIPT = "ppo_evaluation_bitmap_new.py" # Or "python ppo_train_bitmap.py" if not executable
+# TRAINING_SCRIPT = "ppo_pretrain.py" # Or "python ppo_train_bitmap.py" if not executable
+TRAINING_SCRIPT = "ppo_pretrain_transformer_cross.py" # Or "python ppo_train_bitmap.py" if not executable
 
 # --- Define Experiment Configurations ---
 # Each dictionary contains the arguments for one run of ppo_train_bitmap.py
 experiment_configurations = [
     {
+        "scenario_name": "formation_control_teacher_graph_obs_cuda1_bitmap2",
         "experiment_name": "ppo_bitmap_lr3e4_std0.2_rwg1_rwc-0.5",
         "train_env_type": "bitmap",
-        "empty_policy_filename": "ppo_bitmap_empty_200_pretrain.pth", # Optional: if you have one
-        "clutter_policy_filename": "ppo_bitmap_clutter_200_pretrain.pth", # Optional: if you have one
-        "clutter_to_tunnel_policy_filename": "", # Optional: if you have one
-        "tunnel_policy_filename": "",
+        "lidar_encoder_filename": "lidar_autoencoder_pretrained_clutter_3.pth",
+        # "policy_filename": "ppo_bitmap_clutter.pth", # Optional: if you have one
+        # "critic_filename": "ppo_bitmap_clutter_critic.pth", 
+        "policy_filename": "", # Optional: if you have one
         "critic_filename": "", 
-        "output_policy_filename": "output.pth",
-        "output_critic_filename": "output_critic.pth",
-        "steps_per_epoch": 700,
+        "output_policy_filename": "ppo_bitmap_clutter_200_pretrain.pth",
+        "output_critic_filename": "ppo_bitmap_clutter_critic_200_pretrain.pth",
+        "steps_per_epoch": 200,
         "epochs": 50000, # Shorter for example
         "device": "cpu", # Assign specific GPU if available
         "learning_rate": 3e-4,
@@ -26,7 +28,7 @@ experiment_configurations = [
         "reward_weight_goal": 1.0,
         "reward_weight_collision": -0.5,
         "num_envs": 20,
-        "seed": 1,
+        "seed": 0,
         "has_laser": True,
         "train_map_directory": "train_maps_2_clutter",
         "use_leader_laser_only": False,
@@ -83,7 +85,7 @@ for i, config in enumerate(experiment_configurations):
         # Otherwise, for consistency, convert other multi-word keys from underscore to hyphen for CLI.
 
         # --- ADJUST THIS LOGIC BASED ON YOUR ppo_train_bitmap_new.py DEFINITIONS --- 
-        if arg_name_key in ["clutter_to_tunnel_policy_filename", "empty_policy_filename", "clutter_policy_filename", "tunnel_policy_filename", "critic_filename", "output_critic_filename", "train_map_directory", "train_env_type", "action_std_init", "reward_weight_goal", "reward_weight_collision", "policy_filename", "output_policy_filename", "experiment_name", "steps_per_epoch", "num_envs", "learning_rate", "has_laser", "use_leader_laser_only"]: # Add other keys that are defined with underscores in ppo_train_bitmap_new.py
+        if arg_name_key in ["lidar_encoder_filename","scenario_name", "critic_filename", "output_critic_filename", "train_map_directory", "train_env_type", "action_std_init", "reward_weight_goal", "reward_weight_collision", "policy_filename", "output_policy_filename", "experiment_name", "steps_per_epoch", "num_envs", "learning_rate", "has_laser", "use_leader_laser_only"]: # Add other keys that are defined with underscores in ppo_train_bitmap_new.py
             param_name_cli = f"--{arg_name_key}" # Use underscore directly
         elif arg_name_key in []: # Add keys defined with hyphens in ppo_train_bitmap_new.py
              param_name_cli = f"--{arg_name_key.replace('_', '-')}" # Convert to hyphen

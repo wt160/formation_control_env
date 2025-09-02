@@ -750,7 +750,7 @@ class GATActorWithLaser(nn.Module):
         # Process outputs to get valid mean and std
         action_mean_tanh = torch.tanh(action_mean_raw)
         action_mean_scaled = action_mean_tanh * self.action_limits
-        min_std_val, max_std_val = 0.01, 0.3
+        min_std_val, max_std_val = 0.01, 0.45
         std_output_scaled = torch.sigmoid(action_std_raw_params)
         action_std_processed = min_std_val + std_output_scaled * (max_std_val - min_std_val) + 1e-5
         
@@ -1078,14 +1078,14 @@ def main(args):
     ep_rewards = []
     best_avg_reward = float('-inf')
     best_evaluation_reward = float('-inf')
-    eval_steps_per_episode = 200
+    eval_steps_per_episode = 100
 
     for epoch in range(num_epochs):
         clutter_actor_model.train()
         critic_model.train()
 
         # [num_envs]
-        max_steps_per_episode = 200  # Adjust as needed
+        max_steps_per_episode = 100  # Adjust as needed
         # Initialize storage
         epoch_actions_list = []
         epoch_log_probs_list = []
