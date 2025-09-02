@@ -95,6 +95,8 @@ class BaseScenario(ABC):
     def env_process_action_collectively(self):
         pass
 
+    
+
     @abstractmethod
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         """
@@ -377,6 +379,9 @@ class BaseScenario(ABC):
             >>>         return [line]
         """
         return []
+
+    def set_obstacle_reward_scale(self, scale):
+        return
 
     def process_action(self, agent: Agent):
         """This function can be overridden to process the agent actions before the simulation step.

@@ -4004,14 +4004,41 @@ class Scenario(BaseScenario):
                         elif self.working_mode == "RL":
                             # agent.state.force = 2*(agent.action.u[:, :2] - agent.state.vel[:, :2])
                             # agent.state.torque = agent.action.u[:, 2].unsqueeze(-1) - agent.state.ang_vel[:, :1]
+                            # --- Define your robot's physical limits (you can make these class attributes) ---
+                            MAX_SPEED_X = 1.5  # m/s
+                            MAX_SPEED_Y = 0.6  # m/s
+                            MAX_SPEED_YAW = 1.5 # rad/s
+
+                            # --- P-Controller Gains ---
+                            p_gain_pos = 5.0
+                            p_gain_rot = 2.0
+
+                            # --- 1. Calculate desired velocity from the P-controller (same as before) ---
+                            # Get the error between the current pose and the high-level goal pose
+                            pos_error_x = self.formation_goals[i][:, 0] - agent.state.pos[:, 0]
+                            pos_error_y = self.formation_goals[i][:, 1] - agent.state.pos[:, 1]
+                            # IMPORTANT: Normalize angle error to handle wrap-around (e.g., from pi to -pi)
+                            rot_error = self._normalize_angle(self.formation_goals[i][:, 2] - agent.state.rot[:,0])
+
+                            # Calculate the raw, unclamped velocity commands
+                            vx_desired_unclamped = p_gain_pos * pos_error_x
+                            vy_desired_unclamped = p_gain_pos * pos_error_y
+                            w_desired_unclamped = p_gain_rot * rot_error
+
+                            # --- 2. Clamp the desired velocities to respect physical limits ---
+                            vx_clamped = torch.clamp(vx_desired_unclamped, -MAX_SPEED_X, MAX_SPEED_X)
+                            vy_clamped = torch.clamp(vy_desired_unclamped, -MAX_SPEED_Y, MAX_SPEED_Y)
+                            w_clamped = torch.clamp(w_desired_unclamped, -MAX_SPEED_YAW, MAX_SPEED_YAW)
+
+                            # --- 3. Set the final, safe velocity on the agent ---
                             agent.set_vel(
-                                    torch.stack([5*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 5*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
+                                torch.stack([vx_clamped, vy_clamped], dim=-1),
                                 batch_index=None,
                             )
                             agent.set_ang_vel(
-                                torch.stack([1.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
-                        batch_index=None,
-                            )       
+                                w_clamped.unsqueeze(dim=-1),
+                                batch_index=None,
+                            )
                             # agent.set_vel(
                                     # torch.stack([3*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 3*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
                                 # batch_index=None,

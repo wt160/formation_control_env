@@ -90,6 +90,8 @@ class Environment(TorchVectorizedObject):
         )
         return result[0] if result and len(result) == 1 else result
     
+    def set_obstacle_reward_scale(self, scale):
+        self.scenario.set_obstacle_reward_scale(scale)
 
     def get_leader_paths(self):
         leader_paths = self.scenario.get_leader_paths()

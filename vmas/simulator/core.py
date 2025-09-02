@@ -1731,6 +1731,10 @@ class World(TorchVectorizedObject):
 
         for e in self.entities: 
             if not isinstance(e, BitmapObstacle):
+                # if isinstance(e.shape, Sphere):
+                #     print("ray_origin shape:{}".format(ray_origins.shape))
+                #     d = self._cast_ray_to_sphere(e, casting_entity.state.pos, ray_world_angles, max_range)
+                #     all_hit_dists_list.append(d)
                 continue
             
             if isinstance(e, BitmapObstacle):

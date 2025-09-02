@@ -356,8 +356,6 @@ class Scenario(BaseScenario):
         elif self.env_type == "bitmap_tunnel":
             train_maps_path = os.path.join(script_dir, "..", self.train_map_directory)
 
-        self.origin = [-12.8, -12.8]
-        self.scale = 0.1
         # self.create_obstacles(self.obstacle_pattern, world)
         self.bitmap = self.create_bitmap_obstacle(train_maps_path, world, batch_dim)
         # print("bitmap:{}".format(self.bitmap.shape))
@@ -516,19 +514,6 @@ class Scenario(BaseScenario):
             device=device
         )
 
-        self.left_opening = 0.0
-        self.right_opening = 0.0
-        self.LIDAR_OPENING_SMOOTHING_ALPHA = 0.15 # HYPERPARAMETER: Lower value = more smoothing. Start with 0.1-0.3
-
-        self.smoothed_left_opening = torch.zeros(self.batch_dim, device=self.device)
-        self.smoothed_right_opening = torch.zeros(self.batch_dim, device=self.device)
-
-        self.eva_collision_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
-        #number of agents that are connected to leader
-        self.eva_connection_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
-        self.precompute_evaluation_scene(self.env_type)
-
-
         self.TUNNEL_COMMIT_STEPS = 30 # Hyperparameter: tune based on robot speed and environment scale
 
         # History buffer to store the last N environment types for each parallel env.
@@ -546,22 +531,30 @@ class Scenario(BaseScenario):
             device=self.device, 
             dtype=torch.long
         )
-        self.OA_PREDICT_TIME = 0.7              # seconds, how far to look ahead
-        self.OA_SIMULATION_TIMESTEP = 0.1       # seconds, resolution of the simulated path
-        self.OA_ROBOT_RADIUS = 0.25             # meters, for collision checking
-        self.OA_NUM_ANGULAR_SEARCH_STEPS = 10   # Number of alternative angles to check on each side (left/right)
-        
-        # --- Robot Dynamic Constraints ---
-        self.OA_MAX_SPEED_X = 1.2  # m/s
-        self.OA_MAX_SPEED_Y = 0.5  # m/s
-        self.OA_MAX_SPEED_YAW = 1.0 # rad/s
-        self.footprint_local = self._get_robot_footprint()
-        self.OA_PREDICT_TIME = 0.7              # seconds, how far to look ahead
-        self.OA_NUM_VELOCITY_SEARCH_STEPS = 3   # Number of steps to reduce forward velocity
-        
-     
 
+        self.origin = [-12.8, -12.8]
+
+        self.scale = 0.1
+
+        self.left_opening = 0.0
+        self.right_opening = 0.0
+        self.LIDAR_OPENING_SMOOTHING_ALPHA = 0.15 # HYPERPARAMETER: Lower value = more smoothing. Start with 0.1-0.3
+
+        self.smoothed_left_opening = torch.zeros(self.batch_dim, device=self.device)
+        self.smoothed_right_opening = torch.zeros(self.batch_dim, device=self.device)
+
+        self.eva_collision_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
+        #number of agents that are connected to leader
+        self.eva_connection_num = torch.zeros(self.n_agents - 1, self.batch_dim, device=device)
+        # self.precompute_evaluation_scene(self.env_type)
+
+        self.collision_avoidance_reward_scale = 0.1
+        self.current_env_type =torch.ones(self.batch_dim, device=self.device, dtype=torch.long)
         return world
+
+    def set_obstacle_reward_scale(self, scale):
+        print("formation scenario set scale:{}".format(scale))
+        self.collision_avoidance_reward_scale = scale
 
     def load_map(self, file_path: str, obstacle_threshold: int = 128) -> torch.Tensor:
         """
@@ -660,15 +653,14 @@ class Scenario(BaseScenario):
             bitmap_tensor = bitmap_tensor[:world.batch_dim]
         # print("bitmap_tensor shape:{}".format(bitmap_tensor.shape))
         # Create a single bitmap obstacle with the batched tensor
-        # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
-        # origin = [-12.8, -12.8]
+        origin = [-12.8, -12.8]  # Example origin coordinates (bottom-left corner)
         resolution = 0.1       # Example resolution (meters per pixel)
         
         bitmap_obstacle = BitmapObstacle(
             name="map",
             bitmap=bitmap_tensor,
             resolution=resolution,
-            origin=self.origin
+            origin=origin
         )
         world.add_landmark(bitmap_obstacle)
         
@@ -2855,80 +2847,6 @@ class Scenario(BaseScenario):
                 print(f"Data saved to {file_name}")
 
 
-    def reset_world_at_with_init_pose(self, env_index, init_x, init_y, init_direction):
-        """
-        Reset the world state for a specific environment index with a specified initial direction.
-        
-        Args:
-            env_index (int): The index of the environment to reset
-            init_direction (float or torch.Tensor): The initial heading direction in radians
-        """
-        # Ensure the direction is a tensor with the proper device
-        if not torch.is_tensor(init_direction):
-            init_direction = torch.tensor(init_direction, device=self.device)
-        
-        # Reset timestep counter for this environment
-        if hasattr(self, 't'):
-            self.t = 0
-        
-        # Position the leader agent at the origin
-        self.leader_agent.set_pos(
-            torch.tensor([init_x, init_y], device=self.device),
-            batch_index=env_index,
-        )
-        
-        # Set the formation center to match the leader's position
-        self.formation_center.set_pos(
-            torch.tensor([init_x, init_y], device=self.device),
-            batch_index=env_index,
-        )
-        
-        # Set the formation center position record
-        self.formation_center_pos[env_index, 0] = init_x
-        self.formation_center_pos[env_index, 1] = init_y
-        
-        # Set the leader's rotation to the initial direction
-        self.leader_agent.set_rot(init_direction, batch_index=env_index)
-        self.formation_center.set_rot(init_direction, batch_index=env_index)
-        self.formation_center_pos[env_index, 2] = init_direction
-
-        nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
-        nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
-        # Reset follower agents to their initial positions in the formation
-        # These positions need to be rotated according to the leader's new orientation
-        for i, agent in enumerate(self.world.agents):
-            if i == 0:  # Skip the leader agent (already set)
-                continue
-                
-            # Get the nominal formation position for this agent (relative to leader)
-            nominal_x = nominal_positions_x[i]
-            nominal_y = nominal_positions_y[i]
-            
-            # Rotate the nominal position by init_direction
-            cos_rot = torch.cos(init_direction)
-            sin_rot = torch.sin(init_direction)
-            rotated_x = nominal_x * cos_rot - nominal_y * sin_rot + init_x
-            rotated_y = nominal_x * sin_rot + nominal_y * cos_rot + init_y
-            
-            # Set the agent's position (leader at origin + rotated offset)
-            agent.set_pos(
-                torch.tensor([rotated_x, rotated_y], device=self.device),
-                batch_index=env_index,
-            )
-            
-            # Set the agent's rotation to match the leader's rotation
-            agent.set_rot(init_direction, batch_index=env_index)
-            
-            # Initialize velocity and angular velocity to zero
-            agent.set_vel(
-                torch.tensor([0.0, 0.0], device=self.device),
-                batch_index=env_index,
-            )
-            agent.set_ang_vel(
-                torch.tensor(0, device=self.device),
-                batch_index=env_index,
-            )
-
     def reset_world_at_with_init_direction(self, env_index, init_direction):
         """
         Reset the world state for a specific environment index with a specified initial direction.
@@ -3410,49 +3328,6 @@ class Scenario(BaseScenario):
         
         return False
 
-    def get_forward_env_type(self):
-        instantaneous_env_type = torch.ones(self.batch_dim, device=self.device, dtype=torch.long)
-
-        is_wide_open = (self.smoothed_left_opening > 1.85) & (self.smoothed_right_opening > 1.85)
-        is_narrow = (self.smoothed_left_opening < 0.3) & (self.smoothed_right_opening < 0.3)
-
-        instantaneous_env_type[is_wide_open] = 0
-        instantaneous_env_type[is_narrow] = 2
-        
-        # --- Step 2: Check history to identify "Deep Tunnel" state ---
-        # Check if the last `TUNNEL_COMMIT_STEPS` in the history were all type 2.
-        # This creates a boolean mask of shape [batch_dim].
-        is_deep_in_tunnel = (self.env_type_history == 2).all(dim=1)
-        is_short_in_tunnel = (self.env_type_history_enter_tunnel == 2).all(dim=1)
-        # --- Step 3: Generate the final output type ---
-        # Start with the instantaneous type.
-        final_env_type = instantaneous_env_type.clone()
-        
-        # Where the "deep in tunnel" condition is met, override the type to 3.
-        # This handles the transition from 2 -> 3.
-        final_env_type[is_short_in_tunnel] = 2
-        final_env_type[is_deep_in_tunnel] = 3
-        
-        # --- Step 4: Update the history buffer for the next time step ---
-        # Shift the history one step to the left (discarding the oldest entry).
-        self.env_type_history = torch.roll(self.env_type_history, shifts=-1, dims=1)
-        self.env_type_history_enter_tunnel = torch.roll(self.env_type_history, shifts=-1, dims=1)
-
-        
-        # Add the new *instantaneous* type to the end of the history.
-        # We use the instantaneous type so the history reflects the raw perception,
-        # allowing the "is_deep_in_tunnel" condition to trigger correctly in the future.
-        self.env_type_history[:, -1] = instantaneous_env_type
-        self.env_type_history_enter_tunnel[:, -1] = instantaneous_env_type
-
-        return final_env_type
-
-
-
-
-
-
-        
     def get_leader_paths(self, max_trials=1000):
         """
         Find a path for the leader agent to a randomly selected target point in the bitmap.
@@ -3476,9 +3351,8 @@ class Scenario(BaseScenario):
             # print("compute path {}".format(dim))
             # print("get_leader path dim:{}".format(dim))
             bitmap = self.bitmap.bitmap[dim, :]
-            # origin = [-6.4, -6.4]  # Example origin coordinates (bottom-left corner)
-            # origin = [-12.8, -12.8]
-            # scale = 0.1
+            origin = [-12.8, -12.8]  # Example origin coordinates (bottom-left corner)
+            scale = 0.1
             # Convert bitmap to numpy if it's a torch tensor
             if isinstance(bitmap, torch.Tensor):
                 bitmap = bitmap.cpu().numpy()
@@ -3495,12 +3369,12 @@ class Scenario(BaseScenario):
             bitmap_height, bitmap_width = bitmap.shape
             
             # Convert world position to bitmap coordinates
-            start_x = int((start_pos[0] - self.origin[0]) / self.scale)
-            start_y = int((start_pos[1] - self.origin[1]) / self.scale)
+            start_x = int((start_pos[0] - origin[0]) / scale)
+            start_y = int((start_pos[1] - origin[1]) / scale)
             start_coord = (start_y, start_x)
             
             # Make sure start position is valid
-            if not self._is_valid_point(start_coord, bitmap) or not self._is_safe_point(start_coord, bitmap, agent_radius / self.scale):
+            if not self._is_valid_point(start_coord, bitmap) or not self._is_safe_point(start_coord, bitmap, agent_radius / scale):
             
                 # print("Leader's starting position is invalid or too close to obstacles")
                 # input("Leader's starting position is invalid or too close to obstacles")
@@ -3509,17 +3383,17 @@ class Scenario(BaseScenario):
 
             inflation_radius = 0.0
             if self.train_map_directory == "train_maps_0_clutter":
-                inflation_radius = 5.0
-            elif self.train_map_directory == "train_maps_1_clutter":
-                inflation_radius = 4.0
-            elif self.train_map_directory == "train_maps_2_clutter":
-                inflation_radius = 3.5
-            elif self.train_map_directory == "train_maps_3_clutter":
                 inflation_radius = 3.0
-            elif self.train_map_directory == "train_maps_4_clutter":
+            elif self.train_map_directory == "train_maps_1_clutter":
+                inflation_radius = 2.5
+            elif self.train_map_directory == "train_maps_2_clutter":
                 inflation_radius = 2.0
-            elif self.train_map_directory == "train_maps_5_clutter":
+            elif self.train_map_directory == "train_maps_3_clutter":
                 inflation_radius = 1.5
+            elif self.train_map_directory == "train_maps_4_clutter":
+                inflation_radius = 1.0
+            elif self.train_map_directory == "train_maps_5_clutter":
+                inflation_radius = 0.5
 
             if self.train_map_directory == "train_maps_0_test":
                 inflation_radius = 3.0
@@ -3553,7 +3427,7 @@ class Scenario(BaseScenario):
             # Try finding a path for max_trials attempts
             for trial in range(max_trials):
                 # Randomly pick a target point
-                print("trial:{}".format(trial))
+                # print("trial:{}".format(trial))
                 target_found = False
                 for _ in range(1000):  # Try 100 random points before giving up on this trial
                     if self.env_type == "bitmap_tunnel":
@@ -3585,7 +3459,7 @@ class Scenario(BaseScenario):
                     # Ensure target point is valid and safe
 
 
-                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / self.scale + inflation_radius):
+                    if self._is_valid_point(target_coord, bitmap) and self._is_safe_point(target_coord, bitmap, agent_radius / scale + inflation_radius):
                         target_found = True
                         break
                         
@@ -3597,7 +3471,7 @@ class Scenario(BaseScenario):
                 
                 # print("safe buffer:{}".format(agent_radius / scale))
                 # Find path using A* algorithm with safety buffer for agent radius
-                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / self.scale + inflation_radius))
+                path = self._find_path_a_star(start_coord, target_coord, bitmap, safety_radius=(agent_radius / scale + inflation_radius))
                 
                 # If path found, simplify it and convert back to world coordinates
                 if path:
@@ -3609,12 +3483,12 @@ class Scenario(BaseScenario):
                     world_path = []
                     path_idx = 0
                     for y, x in path:
-                        if path_idx > 3:
-                            world_x = x * self.scale + self.origin[0] - 0.05 +  random.random()*0.1
-                            world_y = y * self.scale + self.origin[1] - 0.05 +  random.random()*0.1
+                        if path_idx > 10:
+                            world_x = x * scale + origin[0] - 0.03 +  random.random()*0.06
+                            world_y = y * scale + origin[1] - 0.03 +  random.random()*0.06
                         else:
-                            world_x = x * self.scale + self.origin[0] 
-                            world_y = y * self.scale + self.origin[1] 
+                            world_x = x * scale + origin[0] 
+                            world_y = y * scale + origin[1] 
                         world_path.append(torch.tensor([world_x, world_y], device=self.leader_agent.state.pos.device))
                         path_idx += 1
                     # print("world_path:{}".format(world_path))
@@ -3622,7 +3496,7 @@ class Scenario(BaseScenario):
                     self.batch_leader_paths.append(world_path)
 
                     target_found = True
-                    print("path found")
+                    # print("path found")
                     break
                 
                 else:
@@ -3639,13 +3513,159 @@ class Scenario(BaseScenario):
         for dim in range(self.batch_dim):
             # print("dim:{}".format(dim))
             # init_direction = self.compute_leader_init_direction(self.batch_leader_paths[dim])
+            # self.reset_world_at_with_init_direction(dim, init_direction)
             start_index, init_x, init_y, init_direction = self.find_random_leader_starting_point(dim, self.batch_leader_paths[dim])
             # self.reset_world_at_with_init_direction(dim, init_direction)
             self.reset_world_at_with_init_pose(dim, init_x, init_y, init_direction)
             self.batch_leader_paths[dim] = self.batch_leader_paths[dim][start_index:]
-        return self.batch_leader_paths
-    
 
+        return self.batch_leader_paths
+
+
+    def reset_world_at_with_init_pose(self, env_index, init_x, init_y, init_direction):
+        line_formation_probability = 0.3 # e.g., 30% of the time, start in a line
+        # Maximum random offset (in meters) to add to each follower's initial position.
+        positional_noise_magnitude = 0.3
+        # ---
+
+        if not torch.is_tensor(init_direction):
+            init_direction = torch.tensor(init_direction, device=self.device)
+        
+        if hasattr(self, 't'):
+            self.t = 0
+        
+        # Set leader and formation center pose
+        leader_init_pos = torch.tensor([init_x, init_y], device=self.device)
+        self.leader_agent.set_pos(leader_init_pos, batch_index=env_index)
+        self.formation_center.set_pos(leader_init_pos, batch_index=env_index)
+        self.formation_center_pos[env_index, 0] = init_x
+        self.formation_center_pos[env_index, 1] = init_y
+        
+        self.leader_agent.set_rot(init_direction, batch_index=env_index)
+        self.formation_center.set_rot(init_direction, batch_index=env_index)
+        self.formation_center_pos[env_index, 2] = init_direction
+
+        # --- NEW: Select Formation Type Randomly ---
+        # if random.random() < line_formation_probability:
+        #     # Use Line Formation Template
+        #     # A long line of followers directly behind the leader
+        #     nominal_positions_x = [0.0, -1.3, -2.6, -3.9, -5.2]
+        #     nominal_positions_y = [0.0, 0.0, 0.0, 0.0, 0.0]
+        # else:
+            # Use Default V-Shape Formation Template
+        nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+        nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+
+        # Reset follower agents to their initial positions in the chosen formation
+        for i, agent in enumerate(self.world.agents):
+            if i == 0:  # Skip the leader agent
+                continue
+                
+            # Get the nominal formation position for this agent (relative to leader at origin)
+            nominal_x = nominal_positions_x[i]
+            nominal_y = nominal_positions_y[i]
+            
+            # Rotate the nominal position by the leader's initial direction
+            cos_rot = torch.cos(init_direction)
+            sin_rot = torch.sin(init_direction)
+            rotated_x = nominal_x * cos_rot - nominal_y * sin_rot
+            rotated_y = nominal_x * sin_rot + nominal_y * cos_rot
+            
+            # --- NEW: Add Positional Jitter ---
+            # Add a small random offset to the final position for robustness
+            noise_x = random.uniform(-positional_noise_magnitude, positional_noise_magnitude)
+            noise_y = random.uniform(-positional_noise_magnitude, positional_noise_magnitude)
+            
+            # Set the agent's final global position (leader's position + rotated offset + noise)
+            final_pos = torch.tensor([
+                init_x + rotated_x + noise_x,
+                init_y + rotated_y + noise_y
+            ], device=self.device)
+            
+            agent.set_pos(final_pos, batch_index=env_index)
+            
+            # Set the agent's rotation to match the leader's rotation
+            agent.set_rot(init_direction, batch_index=env_index)
+            
+            # Initialize velocity and angular velocity to zero
+            agent.set_vel(torch.tensor([0.0, 0.0], device=self.device), batch_index=env_index)
+            agent.set_ang_vel(torch.tensor(0.0, device=self.device), batch_index=env_index)
+
+    # def reset_world_at_with_init_pose(self, env_index, init_x, init_y, init_direction):
+    #     """
+    #     Reset the world state for a specific environment index with a specified initial direction.
+        
+    #     Args:
+    #         env_index (int): The index of the environment to reset
+    #         init_direction (float or torch.Tensor): The initial heading direction in radians
+    #     """
+    #     # Ensure the direction is a tensor with the proper device
+    #     if not torch.is_tensor(init_direction):
+    #         init_direction = torch.tensor(init_direction, device=self.device)
+        
+    #     # Reset timestep counter for this environment
+    #     if hasattr(self, 't'):
+    #         self.t = 0
+        
+    #     # Position the leader agent at the origin
+    #     self.leader_agent.set_pos(
+    #         torch.tensor([init_x, init_y], device=self.device),
+    #         batch_index=env_index,
+    #     )
+        
+    #     # Set the formation center to match the leader's position
+    #     self.formation_center.set_pos(
+    #         torch.tensor([init_x, init_y], device=self.device),
+    #         batch_index=env_index,
+    #     )
+        
+    #     # Set the formation center position record
+    #     self.formation_center_pos[env_index, 0] = init_x
+    #     self.formation_center_pos[env_index, 1] = init_y
+        
+    #     # Set the leader's rotation to the initial direction
+    #     self.leader_agent.set_rot(init_direction, batch_index=env_index)
+    #     self.formation_center.set_rot(init_direction, batch_index=env_index)
+    #     self.formation_center_pos[env_index, 2] = init_direction
+
+    #     nominal_positions_x = [0.0, -1.2, -1.2, -2.4, -2.4]
+    #     nominal_positions_y = [0.0, 0.6, -0.6, 1.2, -1.2]
+
+    #     # line_positions_x = [0.0, ]
+    #     # Reset follower agents to their initial positions in the formation
+    #     # These positions need to be rotated according to the leader's new orientation
+    #     for i, agent in enumerate(self.world.agents):
+    #         if i == 0:  # Skip the leader agent (already set)
+    #             continue
+                
+    #         # Get the nominal formation position for this agent (relative to leader)
+    #         nominal_x = nominal_positions_x[i]
+    #         nominal_y = nominal_positions_y[i]
+            
+    #         # Rotate the nominal position by init_direction
+    #         cos_rot = torch.cos(init_direction)
+    #         sin_rot = torch.sin(init_direction)
+    #         rotated_x = nominal_x * cos_rot - nominal_y * sin_rot + init_x
+    #         rotated_y = nominal_x * sin_rot + nominal_y * cos_rot + init_y
+            
+    #         # Set the agent's position (leader at origin + rotated offset)
+    #         agent.set_pos(
+    #             torch.tensor([rotated_x, rotated_y], device=self.device),
+    #             batch_index=env_index,
+    #         )
+            
+    #         # Set the agent's rotation to match the leader's rotation
+    #         agent.set_rot(init_direction, batch_index=env_index)
+            
+    #         # Initialize velocity and angular velocity to zero
+    #         agent.set_vel(
+    #             torch.tensor([0.0, 0.0], device=self.device),
+    #             batch_index=env_index,
+    #         )
+    #         agent.set_ang_vel(
+    #             torch.tensor(0, device=self.device),
+    #             batch_index=env_index,
+    #         )
 
     def find_random_leader_starting_point(self, dim, world_path):
         default_angle = torch.tensor(0.0, device=self.device)
@@ -3658,10 +3678,10 @@ class Scenario(BaseScenario):
         trial_index = 0
         check_start_index = 0
         while trial_index < num_trials:
-            if path_length > 60:
+            if path_length > 80:
                 check_start_index = np.random.randint(10, 30)
             else:
-                check_start_index = 10
+                check_start_index = np.random.randint(10, 30)
             is_free, init_x, init_y, init_direction = self.check_formation_free(dim, world_path, check_start_index)
             if is_free:
                 return check_start_index, init_x, init_y, init_direction
@@ -3721,7 +3741,6 @@ class Scenario(BaseScenario):
                 return False, None, None, None
 
         return True,  init_x, init_y, init_direction
-
     def compute_leader_init_direction(self, world_path):
         """
         Compute the initial direction for the leader agent based on the first segment of the path.
@@ -4004,21 +4023,21 @@ class Scenario(BaseScenario):
                 ang_vel[env_idx] = angular_gain * angle_diff
                 
                 # Set linear velocity based on distance and angle alignment
-                max_speed = 0.4  # Maximum speed
+                max_speed = 0.5  # Maximum speed
                 
                 # Reduce speed when not well-aligned with the target
                 alignment_factor = torch.cos(angle_diff)
-                alignment_factor = torch.clamp(alignment_factor, 0.3, 1.0)  # Between 0.3 and 1
+                alignment_factor = torch.clamp(alignment_factor, 0.6, 1.0)  # Between 0.3 and 1
                 
                 # When the angle difference is large, focus on turning first
                 if abs(angle_diff) > 0.5:  # About 30 degrees
-                    speed = max_speed * 0.3  # Move slower when turning sharply
+                    speed = max_speed * 0.5  # Move slower when turning sharply
                 else:
                     speed = max_speed * alignment_factor
-                random_factor = random.random()
+                # random_factor = random.random()
                 # Set velocity components in world frame
-                vel_x[env_idx] = speed * random_factor * torch.cos(leader_rot + angle_diff * 0.5)
-                vel_y[env_idx] = speed * random_factor * torch.sin(leader_rot + angle_diff * 0.5)
+                vel_x[env_idx] = speed * torch.cos(leader_rot + angle_diff * 0.5)
+                vel_y[env_idx] = speed * torch.sin(leader_rot + angle_diff * 0.5)
                 
                 # vel_x[env_idx] = 0.01
                 # vel_y[env_idx] = 0.0
@@ -4245,9 +4264,15 @@ class Scenario(BaseScenario):
                         elif self.working_mode == "RL":
                             # agent.state.force = 2*(agent.action.u[:, :2] - agent.state.vel[:, :2])
                             # agent.state.torque = agent.action.u[:, 2].unsqueeze(-1) - agent.state.ang_vel[:, :1]
-                            p_gain_pos = 2.5
+                            MAX_SPEED_X = 1.5  # m/s
+                            MAX_SPEED_Y = 0.6  # m/s
+                            MAX_SPEED_YAW = 1.5 # rad/s
+
+                            # --- P-Controller Gains ---
+                            p_gain_pos = 5.0
                             p_gain_rot = 2.0
-                            
+
+                            # --- 1. Calculate desired velocity from the P-controller (same as before) ---
                             # Get the error between the current pose and the high-level goal pose
                             pos_error_x = self.formation_goals[i][:, 0] - agent.state.pos[:, 0]
                             pos_error_y = self.formation_goals[i][:, 1] - agent.state.pos[:, 1]
@@ -4260,32 +4285,22 @@ class Scenario(BaseScenario):
                             w_desired_unclamped = p_gain_rot * rot_error
 
                             # --- 2. Clamp the desired velocities to respect physical limits ---
-                            # This uses the maximum speed parameters defined in your ObstacleAvoidanceControllerMixin
-                            vx_clamped = torch.clamp(vx_desired_unclamped, -self.OA_MAX_SPEED_X, self.OA_MAX_SPEED_X)
-                            vy_clamped = torch.clamp(vy_desired_unclamped, -self.OA_MAX_SPEED_Y, self.OA_MAX_SPEED_Y)
-                            w_clamped = torch.clamp(w_desired_unclamped, -self.OA_MAX_SPEED_YAW, self.OA_MAX_SPEED_YAW)
-                            
-                            # This is the realistic velocity command that the high-level policy "wants"
-                            original_velocity_clamped = torch.stack([vx_clamped, vy_clamped, w_clamped], dim=-1)
+                            vx_clamped = torch.clamp(vx_desired_unclamped, -MAX_SPEED_X, MAX_SPEED_X)
+                            vy_clamped = torch.clamp(vy_desired_unclamped, -MAX_SPEED_Y, MAX_SPEED_Y)
+                            w_clamped = torch.clamp(w_desired_unclamped, -MAX_SPEED_YAW, MAX_SPEED_YAW)
 
-                            # oa_velocity = self.get_oa_velocity(agent, i, original_velocity_clamped)
-                            
+                            # --- 3. Set the final, safe velocity on the agent ---
                             agent.set_vel(
-                                   original_velocity_clamped[:, :2],
+                                torch.stack([vx_clamped, vy_clamped], dim=-1),
                                 batch_index=None,
                             )
-                            # print("dwa vel:{}".format(apf_vel.shape))
-                        #     agent.set_ang_vel(
-                        #         torch.stack([1.5*(self.formation_goals[i][:, 2] - agent.state.rot[:,0])], dim=-1),
-                        # batch_index=None,
-                        #     )       
                             agent.set_ang_vel(
-                                original_velocity_clamped[:, 2].unsqueeze(dim=-1),
-                        batch_index=None,
-                            )       
+                                w_clamped.unsqueeze(dim=-1),
+                                batch_index=None,
+                            )
                             # agent.set_vel(
-                            #         torch.stack([3*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 3*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
-                            #     batch_index=None,
+                                    # torch.stack([3*(self.formation_goals[i][:, 0] - agent.state.pos[:, 0]), 3*(self.formation_goals[i][:, 1] - agent.state.pos[:, 1])], dim=-1) ,
+                                # batch_index=None,
                             # )
                         elif self.working_mode == "potential_field":
                             agent.set_vel(
@@ -4327,189 +4342,6 @@ class Scenario(BaseScenario):
                     )
                 # print("formation goal {}, {}".format(i, self.formation_goals_landmark[i].state.pos))
         
-    def _simulate_holonomic_trajectory(self, vx: Tensor, vy: Tensor, w: Tensor) -> Tensor:
-        """
-        Simulates a short trajectory for a holonomic robot given a velocity command.
-        
-        Args:
-            vx, vy, w (Tensor): Tensors of shape [batch_dim] for linear and angular velocities.
-        
-        Returns:
-            Tensor: Simulated trajectory points of shape [batch_dim, num_sim_steps, 2]
-                    in the robot's local frame.
-        """
-        batch_dim = vx.shape[0]
-        num_sim_steps = int(self.OA_PREDICT_TIME / self.OA_SIMULATION_TIMESTEP)
-        
-        # Initialize trajectory points at the origin (robot's local frame)
-        trajectory = torch.zeros(batch_dim, num_sim_steps, 2, device=self.device)
-        
-        # Initial local pose is (0, 0, 0)
-        x = torch.zeros(batch_dim, device=self.device)
-        y = torch.zeros(batch_dim, device=self.device)
-        theta = torch.zeros(batch_dim, device=self.device)
-
-        for t in range(num_sim_steps):
-            # For a holonomic robot, vx and vy are directly in the local frame
-            x += vx * self.OA_SIMULATION_TIMESTEP
-            y += vy * self.OA_SIMULATION_TIMESTEP
-            # Note: For a diff-drive robot, this would be different:
-            # theta += w * self.OA_SIMULATION_TIMESTEP
-            # x += vx * torch.cos(theta) * self.OA_SIMULATION_TIMESTEP
-            # y += vx * torch.sin(theta) * self.OA_SIMULATION_TIMESTEP
-            
-            trajectory[:, t, 0] = x
-            trajectory[:, t, 1] = y
-            
-        return trajectory
-
-    def _get_robot_footprint(self) -> Tensor:
-        """Creates a set of points representing the robot's circular footprint."""
-        footprint = [
-            [0.0, 0.0], [self.OA_ROBOT_RADIUS, 0.0], [-self.OA_ROBOT_RADIUS, 0.0],
-            [0.0, self.OA_ROBOT_RADIUS], [0.0, -self.OA_ROBOT_RADIUS]
-        ]
-        return torch.tensor(footprint, device=self.device, dtype=torch.float32)
-
-    def _check_trajectory_collision(self, trajectory_local: Tensor, current_pos: Tensor, current_rot: Tensor) -> Tensor:
-        """Checks if the robot's circular footprint collides with obstacles along a trajectory."""
-        batch_dim, num_sim_steps, _ = trajectory_local.shape
-        num_footprint_points = self.footprint_local.shape[0]
-
-        trajectory_with_footprint_local = trajectory_local.unsqueeze(2) + self.footprint_local.view(1, 1, -1, 2)
-        
-        cos_rot = torch.cos(current_rot).unsqueeze(1)
-        sin_rot = torch.sin(current_rot).unsqueeze(1)
-        current_pos_exp = current_pos.unsqueeze(1).unsqueeze(2)
-
-        x_local = trajectory_with_footprint_local[..., 0]
-        y_local = trajectory_with_footprint_local[..., 1]
-        x_global_offset = x_local * cos_rot - y_local * sin_rot
-        y_global_offset = x_local * sin_rot + y_local * cos_rot
-        global_traj_points = torch.stack([x_global_offset, y_global_offset], dim=-1) + current_pos_exp
-        
-        global_traj_points_flat = global_traj_points.view(-1, 2)
-        grid_indices = ((global_traj_points_flat - self.bitmap.origin) / self.bitmap.resolution).long()
-        
-        # grid_indices[:, 0] = torch.clamp(grid_indices[:, 0], 0, self.bitmap.grid_size - 1)
-        # grid_indices[:, 1] = torch.clamp(grid_indices[:, 1], 0, self.bitmap.grid_size - 1)
-
-        batch_indices = torch.arange(batch_dim, device=self.device).repeat_interleave(num_sim_steps * num_footprint_points)
-        values = self.bitmap.bitmap[batch_indices, grid_indices[:, 1], grid_indices[:, 0]]
-        is_collision_flat = (values == self.bitmap.obstacle_value)
-        
-        return torch.any(is_collision_flat.view(batch_dim, -1), dim=1)
-
-    def get_oa_velocity(self, agent, agent_idx: int, original_velocity: Tensor) -> Tensor:
-        """
-        Checks the original velocity command for safety using a prioritized search.
-        If unsafe, it tries to find a safe alternative by first reducing lateral velocity,
-        then searching angular velocity, then reducing forward velocity.
-        """
-        # --- 0. Get Current State and Find the Bitmap Obstacle ---
-        
-        current_pos = agent.state.pos
-        current_rot = agent.state.rot
-        
-        # Initialize final velocities with the original command
-        final_vx = original_velocity[:, 0].clone()
-        final_vy = original_velocity[:, 1].clone()
-        final_w = original_velocity[:, 2].clone()
-
-        # --- Search Level 1: Check original velocity ---
-        original_traj = self._simulate_holonomic_trajectory(final_vx, final_vy, final_w)
-        is_unsafe = self._check_trajectory_collision(original_traj, current_pos, current_rot)
-        
-        # If all trajectories in the batch are safe, we are done
-        if not torch.any(is_unsafe):
-            return original_velocity
-
-        # --- Search Level 2: Try setting lateral velocity to zero ---
-        # Only for the environments that were unsafe
-        unsafe_indices = is_unsafe.nonzero(as_tuple=True)[0]
-        vy_zeroed = torch.zeros_like(final_vy[unsafe_indices])
-        
-        traj_vy_zeroed = self._simulate_holonomic_trajectory(final_vx[unsafe_indices], vy_zeroed, final_w[unsafe_indices])
-        is_still_unsafe_after_vy_zero = self._check_trajectory_collision(traj_vy_zeroed, current_pos[unsafe_indices], current_rot[unsafe_indices])
-        
-        # Update the velocities for those that are now safe
-        newly_safe_mask = ~is_still_unsafe_after_vy_zero
-        if newly_safe_mask.any():
-            indices_now_safe = unsafe_indices[newly_safe_mask]
-            final_vy[indices_now_safe] = 0.0
-            # Update the main `is_unsafe` mask
-            is_unsafe[indices_now_safe] = False
-        
-        if not torch.any(is_unsafe):
-            return torch.stack([final_vx, final_vy, final_w], dim=1)
-
-        # --- Search Level 3 & 4: Iteratively search angular and forward velocities ---
-        # We only need to search for the envs that are still unsafe
-        unsafe_indices = is_unsafe.nonzero(as_tuple=True)[0]
-        
-        # For these remaining unsafe trajectories, we will work with vy=0
-        vx_to_search = final_vx[unsafe_indices]
-        vy_to_search = torch.zeros_like(vx_to_search) # Lateral velocity is now zero
-        w_to_search = final_w[unsafe_indices]
-
-        found_safe_alternative = torch.zeros_like(unsafe_indices, dtype=torch.bool)
-        
-        # Velocity reduction steps (e.g., 100%, 75%, 50%)
-        vel_reduction_factors = torch.linspace(1.0, 0.25, self.OA_NUM_VELOCITY_SEARCH_STEPS, device=self.device)
-        angular_search_space = torch.linspace(0, self.OA_MAX_SPEED_YAW, self.OA_NUM_ANGULAR_SEARCH_STEPS, device=self.device)
-
-        for vel_factor in vel_reduction_factors:
-            if found_safe_alternative.all(): break
-            
-            current_vx_candidate = vx_to_search * vel_factor
-            
-            for i in range(1, self.OA_NUM_ANGULAR_SEARCH_STEPS):
-                if found_safe_alternative.all(): break
-                
-                for turn_direction in [1, -1]:
-                    if found_safe_alternative.all(): break
-                    
-                    indices_to_check = unsafe_indices[~found_safe_alternative]
-                    if indices_to_check.numel() == 0: break
-                    
-                    # Get the subset of velocities for the envs we are still trying to fix
-                    vx_subset = current_vx_candidate[~found_safe_alternative]
-                    vy_subset = vy_to_search[~found_safe_alternative]
-                    w_subset_original = w_to_search[~found_safe_alternative]
-
-                    w_candidate = w_subset_original + turn_direction * angular_search_space[i]
-                    w_candidate = torch.clamp(w_candidate, -self.OA_MAX_SPEED_YAW, self.OA_MAX_SPEED_YAW)
-
-                    candidate_traj = self._simulate_holonomic_trajectory(vx_subset, vy_subset, w_candidate)
-                    
-                    is_candidate_unsafe = self._check_trajectory_collision(
-                        candidate_traj, 
-                        current_pos[indices_to_check], 
-                        current_rot[indices_to_check]
-                    )
-                    
-                    newly_safe_mask = ~is_candidate_unsafe
-                    if newly_safe_mask.any():
-                        indices_of_newly_safe = indices_to_check[newly_safe_mask]
-                        # Update the final velocities for these envs
-                        final_vx[indices_of_newly_safe] = vx_subset[newly_safe_mask]
-                        final_vy[indices_of_newly_safe] = vy_subset[newly_safe_mask] # Stays 0
-                        final_w[indices_of_newly_safe] = w_candidate[newly_safe_mask]
-                        
-                        # Update the master `found_safe_alternative` mask
-                        temp_found_mask = torch.zeros_like(unsafe_indices, dtype=torch.bool)
-                        temp_found_mask[~found_safe_alternative] = newly_safe_mask
-                        found_safe_alternative |= temp_found_mask
-
-        # --- Search Level 5: Safety Stop ---
-        # For any trajectories that are still unsafe after all searches, stop the robot
-        still_unsafe_indices = unsafe_indices[~found_safe_alternative]
-        if still_unsafe_indices.numel() > 0:
-            final_vx[still_unsafe_indices] = 0.0
-            final_vy[still_unsafe_indices] = 0.0
-            final_w[still_unsafe_indices] = 0.0
-
-        return torch.stack([final_vx, final_vy, final_w], dim=1)
     
     def compute_agent_velocity(self, agent, agent_index):
         # Get the agent's current position (batch_size x 2)
@@ -5172,60 +5004,7 @@ class Scenario(BaseScenario):
         )
 
         return reward_for_this_agent_batch
-    
-    # def single_agent_collision_obstacle_rew(self, agent):
-    #     #agent.collision_obstacle_rew is of shape torch.zeros(batch_dim, device=device)
-    #     # self.current_lidar_reading  is of shape [batch_size, lidar_ray_num] 
-    #     self.LIDAR_DANGER_THRESHOLD = 0.8  # meters
-    #     self.LIDAR_CRITICAL_DISTANCE = 0.25 # meters
-    #     self.CRITICAL_DISTANCE_PENALTY = -50.0
-    #     self.NORMAL_DANGER_PENALTY_SCALE = -10.0 # Adjusted scale for more impact
-    #     current_agent_index = self.world.agents.index(agent)
-
-    #     lidar_readings = self.current_lidar_reading   # Shape: [batch_dim, lidar_ray_num]
-    #     print("lidar_readings:{}".format(lidar_readings))
-    #     batch_dim = lidar_readings.shape[0]
-        
-    #     if batch_dim == 0: # No environments in the batch
-    #         return
-
-    #     # Mask for readings below the critical distance
-    #     critical_mask = lidar_readings < self.LIDAR_CRITICAL_DISTANCE
-    #     # Mask for readings in the "danger zone" (below danger threshold but not critical)
-    #     danger_mask = (lidar_readings < self.LIDAR_DANGER_THRESHOLD) & (~critical_mask)
-    #     # Calculate penalties for critical distances
-    #     # Assign CRITICAL_DISTANCE_PENALTY where critical_mask is true, 0 otherwise
-    #     critical_penalties = torch.where(
-    #         critical_mask,
-    #         torch.full_like(lidar_readings, self.CRITICAL_DISTANCE_PENALTY, device=lidar_readings.device),
-    #         torch.zeros_like(lidar_readings, device=lidar_readings.device)
-    #     )
-
-    #     # Calculate penalties for normal danger zone
-    #     # Penalty = SCALE * (THRESHOLD - reading)
-    #     # This makes penalty more negative as reading gets smaller (closer to obstacle)
-    #     normal_danger_penalties = torch.where(
-    #         danger_mask,
-    #         self.NORMAL_DANGER_PENALTY_SCALE * (self.LIDAR_DANGER_THRESHOLD - lidar_readings),
-    #         torch.zeros_like(lidar_readings, device=lidar_readings.device)
-    #     )
-        
-    #     # Combine penalties: critical penalties take precedence if a ray is in both (though our masks are exclusive)
-    #     # Summing them works because only one mask can be true for a given reading for the penalty part.
-    #     total_penalties_per_ray = critical_penalties + normal_danger_penalties
-        
-    #     # Sum penalties from all rays for each instance in the batch
-    #     # This means if multiple rays detect obstacles, the penalty accumulates.
-    #     # An alternative could be to take the min penalty (most severe single ray),
-    #     # or average of non-zero penalties. Summing is often a strong signal.
-    #     reward_for_this_agent_batch = total_penalties_per_ray.sum(dim=1) # Sum over lidar_ray_num dimension
-
-    #     # Add this calculated reward component to the agent's reward attribute.
-    #     # If agent.collision_obstacle_rew should *only* be this value, then use direct assignment:
-    #     # agent.collision_obstacle_rew = reward_for_this_agent_batch
-    #     # If it's an accumulator for various collision/obstacle related rewards:
-         
-    #     return reward_for_this_agent_batch
+  
     
     def compute_agent_connectivity_reward(self, agent):
         current_agent_index = self.world.agents.index(agent)
@@ -5342,10 +5121,197 @@ class Scenario(BaseScenario):
         return torch.cat([local_x, local_y], dim=2)
 
 
-    def compute_group_sector_reward(self):
+    # def compute_group_sector_reward(self):
+    #     """
+    #     Computes a reward based on containing followers and their centroid within
+    #     a sector defined in polar coordinates relative to the leader.
+    #     """
+    #     self.SECTOR_MIN_RADIUS = 0.5  # meters, closest followers can get to the leader
+    #     self.SECTOR_MAX_RADIUS = 5  # meters, farthest followers can get from the leader
+    #     self.SECTOR_HALF_ANGLE = np.deg2rad(85) # rad, e.g., +/- 60 degrees from leader's back
+
+    #     # --- Centroid Target Parameters ---
+    #     # Defines the smaller, ideal region for the group's center.
+    #     # This now defines a "sweet spot" range for the centroid's distance.
+    #     self.CENTROID_MIN_RADIUS = 1.1 # The closest the centroid should ideally be
+    #     self.CENTROID_MAX_RADIUS = 3.5 # The farthest the centroid should ideally be
+    #     self.CENTROID_HALF_ANGLE = np.deg2rad(85) # rad, angular tolerance for the centroid
+
+    #     # --- Reward Scaling ---
+    #     # Penalty for individual followers leaving the main sector
+    #     self.OUT_OF_SECTOR_PENALTY_SCALE = -15.0
+    #     # Penalty for the group centroid deviating from its ideal position
+    #     self.CENTROID_ERROR_PENALTY_SCALE = -10.0
+    #     # if self.total_num_agents <= 1:
+    #     #     return torch.zeros(self.batch_dim, device=self.device)
+
+    #     follower_agents = [agent for agent in self.world.agents if agent is not self.leader_agent]
+    #     if not follower_agents:
+    #         return torch.zeros(self.batch_dim, device=self.device)
+
+    #     leader_pos = self.leader_agent.state.pos
+    #     leader_orient = self.leader_agent.state.rot
+
+    #     # --- 1. Get all follower positions in the leader's local frame ---
+    #     all_follower_pos_global = torch.stack([agent.state.pos for agent in follower_agents], dim=1)
+    #     follower_pos_local = self._transform_to_leader_local_frame(all_follower_pos_global, leader_pos, leader_orient)
+    #     # print("follower_pos_local:{}".format(follower_pos_local))
+    #     # --- 2. Convert local XY to local Polar coordinates for each follower ---
+    #     follower_radii = torch.norm(follower_pos_local, dim=2) 
+    #     # print("follower radii:{}".format(follower_radii))
+    #     follower_angles = torch.atan2(follower_pos_local[..., 1], follower_pos_local[..., 0])
+    #     # print("follower_angles:{}".format(follower_angles))
+    #     # --- 3. Calculate Individual Follower Containment Penalty ---
+    #     # Radial error: how far each follower is outside the min/max radius bounds
+    #     radius_error_low = torch.relu(self.SECTOR_MIN_RADIUS - follower_radii)
+    #     radius_error_high = torch.relu(follower_radii - self.SECTOR_MAX_RADIUS)
+    #     radius_error = radius_error_low + radius_error_high
+
+    #     # Angular error: how far each follower is from the leader's BACKWARD direction (pi radians)
+    #     # We normalize the difference to get the smallest angle.
+    #     angular_error_from_back = torch.abs(self._normalize_angle(follower_angles - torch.pi))
+    #     # print("angular error from back:{}".format(angular_error_from_back))
+    #     # input("1")
+    #     angle_error = torch.relu(angular_error_from_back - self.SECTOR_HALF_ANGLE)
+        
+    #     # Combine errors and apply a bounded penalty. Sum over all followers.
+    #     total_follower_error = torch.sqrt(radius_error**2 + angle_error**2)
+    #     per_follower_penalty = self.OUT_OF_SECTOR_PENALTY_SCALE * torch.tanh(total_follower_error)
+    #     individual_containment_penalty = torch.sum(per_follower_penalty, dim=1)
+
+    #     # --- 4. Calculate Group Centroid Cohesion Penalty ---
+    #     centroid_pos_local = torch.mean(follower_pos_local, dim=1)
+    #     centroid_radius = torch.norm(centroid_pos_local, dim=1)
+    #     centroid_angle = torch.atan2(centroid_pos_local[:, 1], centroid_pos_local[:, 0])
+
+    #     # Calculate error from the ideal centroid position (range of radii behind leader)
+    #     centroid_radius_error_low = torch.relu(self.CENTROID_MIN_RADIUS - centroid_radius)
+    #     centroid_radius_error_high = torch.relu(centroid_radius - self.CENTROID_MAX_RADIUS)
+    #     centroid_radius_error = centroid_radius_error_low + centroid_radius_error_high
+        
+    #     # Angular error for centroid relative to the backward direction
+    #     centroid_angular_error_from_back = torch.abs(self._normalize_angle(centroid_angle - torch.pi))
+    #     centroid_angle_error = torch.relu(centroid_angular_error_from_back - self.CENTROID_HALF_ANGLE)
+
+    #     total_centroid_error = torch.sqrt(centroid_radius_error**2 + centroid_angle_error**2)
+    #     centroid_cohesion_penalty = self.CENTROID_ERROR_PENALTY_SCALE * torch.tanh(total_centroid_error)
+
+    #     # --- 5. Combine Penalties ---
+    #     final_group_reward = individual_containment_penalty + centroid_cohesion_penalty
+        
+    #     return final_group_reward
+
+
+    def compute_adaptive_sector_reward(self, agent) -> Tensor:
         """
-        Computes a reward based on containing followers and their centroid within
-        a sector defined in polar coordinates relative to the leader.
+        Computes the cohesion and containment reward for a single specified agent
+        based on a dynamically shaped sector.
+        """
+        self.OPEN_SPACE_MIN_RADIUS = 1.0
+        self.OPEN_SPACE_MAX_RADIUS = 2.5
+        self.OPEN_SPACE_HALF_ANGLE = np.deg2rad(45)
+
+        # Parameters for narrow passages (encourages a line formation)
+        self.LINE_FORMATION_MIN_RADIUS = 1.0
+        self.LINE_FORMATION_MAX_RADIUS = 5.0
+        self.LINE_FORMATION_HALF_ANGLE = np.deg2rad(15)
+        self.OPEN_SPACE_LATERAL_HALFWIDTH = 2.0  # Wide containment box
+        self.OPEN_SPACE_LONGITUDINAL_HALFLENGTH = 1.5
+
+        # --- Target Formation Parameters (for narrow, line formations) ---
+        self.LINE_FORMATION_CENTER_X = 3.0  # Centroid is further back
+        self.LINE_FORMATION_LATERAL_HALFWIDTH = 0.01 # Very narrow containment
+        self.LINE_FORMATION_LONGITUDINAL_HALFLENGTH = 3.0
+        # --- Reward Scaling ---
+        self.INDIVIDUAL_CONTAINMENT_SCALE = -20.0 # Strong penalty for an agent being out of place
+        self.CENTROID_COHESION_SCALE = -10.0      # Weaker penalty for the group's center being off
+
+        # --- Adaptation Control ---
+        self.OPENING_TRANSITION_MIDPOINT = 2.5 # The total opening width (m) where transition is halfway
+        self.OPENING_TRANSITION_STEEPNESS = 2.0 
+        if agent is self.leader_agent:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        follower_agents = [a for a in self.world.agents if a is not self.leader_agent]
+        num_followers = len(follower_agents)
+        if num_followers == 0:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        try:
+            agent_follower_index = follower_agents.index(agent)
+        except ValueError:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        leader_pos = self.leader_agent.state.pos
+        leader_orient = self.leader_agent.state.rot
+
+        # --- 1. Smoothly Interpolate Formation Parameters based on LiDAR Opening ---
+        total_opening_width = self.smoothed_left_opening + self.smoothed_right_opening
+        alpha = torch.sigmoid(self.OPENING_TRANSITION_STEEPNESS * (self.OPENING_TRANSITION_MIDPOINT - total_opening_width))
+
+        # Interpolate the sector's radial boundaries
+        dynamic_min_radius = (1 - alpha) * self.OPEN_SPACE_MIN_RADIUS + alpha * self.LINE_FORMATION_MIN_RADIUS
+        dynamic_max_radius = (1 - alpha) * self.OPEN_SPACE_MAX_RADIUS + alpha * self.LINE_FORMATION_MAX_RADIUS
+
+        # Convert perceived lateral openings into dynamic angular boundaries
+        # Use a reference distance (e.g., the target centroid radius) to calculate the angle
+        ref_dist = (1 - alpha) * self.OPEN_SPACE_MIN_RADIUS + alpha * self.LINE_FORMATION_MAX_RADIUS
+        dynamic_left_half_angle = torch.atan2(self.smoothed_left_opening, ref_dist)
+        dynamic_right_half_angle = torch.atan2(self.smoothed_right_opening, ref_dist)
+
+        # --- 2. Get follower positions and convert to polar coordinates ---
+        all_follower_pos_global = torch.stack([a.state.pos for a in follower_agents], dim=1)
+        follower_pos_local = self._transform_to_leader_local_frame(all_follower_pos_global, leader_pos, leader_orient)
+        
+        follower_radii = torch.norm(follower_pos_local, dim=2)
+        follower_angles = torch.atan2(follower_pos_local[..., 1], follower_pos_local[..., 0])
+
+        # --- 3. Calculate Individual Containment Penalty for the SPECIFIC agent ---
+        this_agent_radius = follower_radii[:, agent_follower_index]
+        this_agent_angle = follower_angles[:, agent_follower_index]
+
+        radius_error = torch.relu(dynamic_min_radius - this_agent_radius) + \
+                       torch.relu(this_agent_radius - dynamic_max_radius)
+        
+        angular_error_from_back = self._normalize_angle(this_agent_angle - torch.pi)
+        
+        # Asymmetric angular error based on the dynamic angles
+        angle_error = torch.where(
+            angular_error_from_back >= 0, # Agent is on the left side of the backward centerline
+            torch.relu(angular_error_from_back - dynamic_left_half_angle),
+            torch.relu(torch.abs(angular_error_from_back) - dynamic_right_half_angle)
+        )
+        
+        total_individual_error = torch.sqrt(radius_error**2 + angle_error**2)
+        individual_containment_penalty = self.INDIVIDUAL_CONTAINMENT_SCALE * torch.tanh(total_individual_error)
+
+        # --- 4. Calculate Shared Group Centroid Cohesion Penalty ---
+        centroid_pos_local = torch.mean(follower_pos_local, dim=1)
+        centroid_radius = torch.norm(centroid_pos_local, dim=1)
+        
+        # The ideal centroid radius also adapts
+        centroid_target_radius = (1 - alpha) * self.OPEN_SPACE_MIN_RADIUS + alpha * self.LINE_FORMATION_CENTER_X
+        centroid_radius_error = torch.abs(centroid_radius - centroid_target_radius)
+        
+        total_centroid_error = centroid_radius_error # Keep centroid error simple
+        centroid_cohesion_penalty_group = self.CENTROID_COHESION_SCALE * torch.tanh(total_centroid_error)
+        
+        # --- 5. Combine Penalties for the SPECIFIC agent ---
+        per_follower_share_of_group_penalty = centroid_cohesion_penalty_group / num_followers
+        final_reward_for_this_agent = individual_containment_penalty + per_follower_share_of_group_penalty
+        
+        return final_reward_for_this_agent
+
+    def compute_group_sector_reward(self, agent) -> Tensor:
+        """
+        Computes the cohesion and containment reward for a single specified agent.
+
+        Args:
+            agent: The specific agent for which to compute the reward.
+
+        Returns:
+            torch.Tensor: A tensor of shape [batch_dim] with the final
+                          reward for the specified agent.
         """
         self.SECTOR_MIN_RADIUS = 0.5  # meters, closest followers can get to the leader
         self.SECTOR_MAX_RADIUS = 5  # meters, farthest followers can get from the leader
@@ -5363,64 +5329,71 @@ class Scenario(BaseScenario):
         self.OUT_OF_SECTOR_PENALTY_SCALE = -15.0
         # Penalty for the group centroid deviating from its ideal position
         self.CENTROID_ERROR_PENALTY_SCALE = -10.0
-        # if self.total_num_agents <= 1:
-        #     return torch.zeros(self.batch_dim, device=self.device)
+        # This reward is only for followers. The leader gets a reward of 0 from this component.
+        if agent is self.leader_agent:
+            return torch.zeros(self.batch_dim, device=self.device)
 
-        follower_agents = [agent for agent in self.world.agents if agent is not self.leader_agent]
-        if not follower_agents:
+        follower_agents = [a for a in self.world.agents if a is not self.leader_agent]
+        num_followers = len(follower_agents)
+
+        if num_followers == 0:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        # Find the index of the current agent in the list of followers
+        try:
+            agent_follower_index = follower_agents.index(agent)
+        except ValueError:
+            # The passed agent is not in the follower list (e.g., it's the leader)
             return torch.zeros(self.batch_dim, device=self.device)
 
         leader_pos = self.leader_agent.state.pos
         leader_orient = self.leader_agent.state.rot
 
-        # --- 1. Get all follower positions in the leader's local frame ---
-        all_follower_pos_global = torch.stack([agent.state.pos for agent in follower_agents], dim=1)
+        # --- 1. Get follower positions and convert to polar coordinates ---
+        all_follower_pos_global = torch.stack([a.state.pos for a in follower_agents], dim=1)
         follower_pos_local = self._transform_to_leader_local_frame(all_follower_pos_global, leader_pos, leader_orient)
-        # print("follower_pos_local:{}".format(follower_pos_local))
-        # --- 2. Convert local XY to local Polar coordinates for each follower ---
-        follower_radii = torch.norm(follower_pos_local, dim=2) 
-        # print("follower radii:{}".format(follower_radii))
+        
+        follower_radii = torch.norm(follower_pos_local, dim=2)
         follower_angles = torch.atan2(follower_pos_local[..., 1], follower_pos_local[..., 0])
-        # print("follower_angles:{}".format(follower_angles))
-        # --- 3. Calculate Individual Follower Containment Penalty ---
-        # Radial error: how far each follower is outside the min/max radius bounds
-        radius_error_low = torch.relu(self.SECTOR_MIN_RADIUS - follower_radii)
-        radius_error_high = torch.relu(follower_radii - self.SECTOR_MAX_RADIUS)
-        radius_error = radius_error_low + radius_error_high
 
-        # Angular error: how far each follower is from the leader's BACKWARD direction (pi radians)
-        # We normalize the difference to get the smallest angle.
+        # --- 2. Calculate Individual Follower Containment Penalty ---
+        radius_error = torch.relu(self.SECTOR_MIN_RADIUS - follower_radii) + \
+                       torch.relu(follower_radii - self.SECTOR_MAX_RADIUS)
+        
         angular_error_from_back = torch.abs(self._normalize_angle(follower_angles - torch.pi))
-        # print("angular error from back:{}".format(angular_error_from_back))
-        # input("1")
         angle_error = torch.relu(angular_error_from_back - self.SECTOR_HALF_ANGLE)
         
-        # Combine errors and apply a bounded penalty. Sum over all followers.
         total_follower_error = torch.sqrt(radius_error**2 + angle_error**2)
-        per_follower_penalty = self.OUT_OF_SECTOR_PENALTY_SCALE * torch.tanh(total_follower_error)
-        individual_containment_penalty = torch.sum(per_follower_penalty, dim=1)
+        # individual_containment_penalty is shape: [batch_dim, num_followers]
+        individual_containment_penalty = self.OUT_OF_SECTOR_PENALTY_SCALE * torch.tanh(total_follower_error)
 
-        # --- 4. Calculate Group Centroid Cohesion Penalty ---
+        # --- 3. Calculate Group Centroid Cohesion Penalty ---
         centroid_pos_local = torch.mean(follower_pos_local, dim=1)
         centroid_radius = torch.norm(centroid_pos_local, dim=1)
         centroid_angle = torch.atan2(centroid_pos_local[:, 1], centroid_pos_local[:, 0])
 
-        # Calculate error from the ideal centroid position (range of radii behind leader)
-        centroid_radius_error_low = torch.relu(self.CENTROID_MIN_RADIUS - centroid_radius)
-        centroid_radius_error_high = torch.relu(centroid_radius - self.CENTROID_MAX_RADIUS)
-        centroid_radius_error = centroid_radius_error_low + centroid_radius_error_high
+        centroid_radius_error = torch.relu(self.CENTROID_MIN_RADIUS - centroid_radius) + \
+                                torch.relu(centroid_radius - self.CENTROID_MAX_RADIUS)
         
-        # Angular error for centroid relative to the backward direction
         centroid_angular_error_from_back = torch.abs(self._normalize_angle(centroid_angle - torch.pi))
         centroid_angle_error = torch.relu(centroid_angular_error_from_back - self.CENTROID_HALF_ANGLE)
 
         total_centroid_error = torch.sqrt(centroid_radius_error**2 + centroid_angle_error**2)
-        centroid_cohesion_penalty = self.CENTROID_ERROR_PENALTY_SCALE * torch.tanh(total_centroid_error)
+        # centroid_cohesion_penalty_group is shape: [batch_dim]
+        centroid_cohesion_penalty_group = self.CENTROID_ERROR_PENALTY_SCALE * torch.tanh(total_centroid_error)
 
-        # --- 5. Combine Penalties ---
-        final_group_reward = individual_containment_penalty + centroid_cohesion_penalty
+        # --- 4. Distribute Group Penalty and Combine Rewards for the SPECIFIC agent ---
+        # Each agent gets an equal share of the group penalty.
+        per_follower_share_of_group_penalty = centroid_cohesion_penalty_group / num_followers
         
-        return final_group_reward
+        # Get the individual penalty for the specified agent from the full tensor.
+        this_agent_individual_penalty = individual_containment_penalty[:, agent_follower_index]
+        
+        # The final reward for this follower is its individual penalty plus its share of the group penalty.
+        final_reward_for_this_agent = this_agent_individual_penalty + per_follower_share_of_group_penalty
+        
+        return final_reward_for_this_agent
+
 
     def compute_group_center_reward(self):
         
@@ -5617,96 +5590,201 @@ class Scenario(BaseScenario):
         
         return final_group_reward
 
-    def compute_connectivity_reward(self):
-        """
-        Computes the connectivity reward for each environment in the batch.
-        Returns a tensor of shape [batch_size] with connectivity rewards.
-        """
-        num_agents = len(self.world.agents)
-        batch_size = self.batch_dim  # Number of parallel environments
+
+
+    # def compute_connectivity_reward(self):
+    #     """
+    #     Computes the connectivity reward for each environment in the batch.
+    #     Returns a tensor of shape [batch_size] with connectivity rewards.
+    #     """
+    #     num_agents = len(self.world.agents)
+    #     batch_size = self.batch_dim  # Number of parallel environments
         
-        # Initialize adjacency matrices: [batch_size, num_agents, num_agents]
-        adjacency = torch.zeros(batch_size, num_agents, num_agents, device=self.device)
+    #     # Initialize adjacency matrices: [batch_size, num_agents, num_agents]
+    #     adjacency = torch.zeros(batch_size, num_agents, num_agents, device=self.device)
         
-        # Compute pairwise connections based on FOV and distance
-        for i, agent1 in enumerate(self.world.agents):
-            for j, agent2 in enumerate(self.world.agents):
-                if i == j:
-                    continue
-                # Get positions and rotations: [batch_size, 2], [batch_size]
-                pos_i = agent1.state.pos  # [batch_size, 2]
-                pos_j = agent2.state.pos  # [batch_size, 2]
-                rot_i = agent1.state.rot  # [batch_size]
+    #     # Compute pairwise connections based on FOV and distance
+    #     for i, agent1 in enumerate(self.world.agents):
+    #         for j, agent2 in enumerate(self.world.agents):
+    #             if i == j:
+    #                 continue
+    #             # Get positions and rotations: [batch_size, 2], [batch_size]
+    #             pos_i = agent1.state.pos  # [batch_size, 2]
+    #             pos_j = agent2.state.pos  # [batch_size, 2]
+    #             rot_i = agent1.state.rot  # [batch_size]
                 
                 
 
-                # Relative position and distance: [batch_size, 2], [batch_size]
-                rel_pos = pos_j - pos_i  # [batch_size, 2]
-                d_ij = torch.norm(rel_pos, dim=1)  # [batch_size]
+    #             # Relative position and distance: [batch_size, 2], [batch_size]
+    #             rel_pos = pos_j - pos_i  # [batch_size, 2]
+    #             d_ij = torch.norm(rel_pos, dim=1)  # [batch_size]
                 
-                # Check if within distance
-                within_distance = d_ij <= self.max_connection_distance  # [batch_size]
-                # print("within_distance shape:{}".format(within_distance.shape))
-                # Compute relative angles: [batch_size]
-                # print("rel_pos shape:{}".format(torch.atan2(rel_pos[:, 1], rel_pos[:, 0]).shape))
-                # print("rot_i shape:{}".format(rot_i.squeeze(dim=1).shape))
-                theta_ij = torch.atan2(rel_pos[:, 1], rel_pos[:, 0]) - rot_i.squeeze(dim=1)  # [batch_size]
-                # Normalize angles to [-pi, pi]
-                theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))  # [batch_size]
-                # print("theta_ij shape:{}".format(theta_ij.shape))
-                # Check if within FOV
-                within_fov = (theta_ij >= self.FOV_min) & (theta_ij <= self.FOV_max)  # [batch_size]
-                # print("within_fov shape:{}".format(within_fov.shape))
-                # Connection exists if within distance and FOV
-                connection = within_distance & within_fov  # [batch_size]
+    #             # Check if within distance
+    #             within_distance = d_ij <= self.max_connection_distance  # [batch_size]
+    #             # print("within_distance shape:{}".format(within_distance.shape))
+    #             # Compute relative angles: [batch_size]
+    #             # print("rel_pos shape:{}".format(torch.atan2(rel_pos[:, 1], rel_pos[:, 0]).shape))
+    #             # print("rot_i shape:{}".format(rot_i.squeeze(dim=1).shape))
+    #             theta_ij = torch.atan2(rel_pos[:, 1], rel_pos[:, 0]) - rot_i.squeeze(dim=1)  # [batch_size]
+    #             # Normalize angles to [-pi, pi]
+    #             theta_ij = torch.atan2(torch.sin(theta_ij), torch.cos(theta_ij))  # [batch_size]
+    #             # print("theta_ij shape:{}".format(theta_ij.shape))
+    #             # Check if within FOV
+    #             within_fov = (theta_ij >= self.FOV_min) & (theta_ij <= self.FOV_max)  # [batch_size]
+    #             # print("within_fov shape:{}".format(within_fov.shape))
+    #             # Connection exists if within distance and FOV
+    #             connection = within_distance & within_fov  # [batch_size]
                 
-                # Ensure connection is [batch_size]
-                connection = connection.view(-1)  # [batch_size]
-                # print("connection shape:{}".format(connection.shape))
-                # Update adjacency matrices: set to 1 if connected
+    #             # Ensure connection is [batch_size]
+    #             connection = connection.view(-1)  # [batch_size]
+    #             # print("connection shape:{}".format(connection.shape))
+    #             # Update adjacency matrices: set to 1 if connected
+    #             adjacency[:, i, j] = connection.float()
+    #             adjacency[:, j, i] = connection.float()
+                    
+    #     #         for dim in range(self.world.batch_dim):
+    #     #             if adjacency[dim, i, j] == 1.0:
+    #     #                 is_line_clear = self.is_line_clear(agent1.state.pos[dim, :], agent2.state.pos[dim, :], self.obstacle_manager_list[dim])
+    #     #                 if is_line_clear == False:
+    #     #                     adjacency[dim, i, j] == 0.0
+    #     #                     adjacency[dim, j, i] = 0.0
+    #     # # Initialize connectivity rewards: [batch_size]
+    #     connectivity_reward = torch.zeros(batch_size, device=self.device)
+    #     # print("adj:{}".format(adjacency))
+    #     # Check connectivity for each environment using BFS
+    #     for env in range(batch_size):
+    #         adj = adjacency[env].cpu().numpy()  # [num_agents, num_agents]
+    #         visited = set()
+    #         queue = deque()
+    #         queue.append(0)  # Start BFS from the first agent
+    #         visited.add(0)
+            
+    #         while queue:
+    #             current = queue.popleft()
+    #             for neighbor in range(num_agents):
+    #                 if adj[current, neighbor] == 1 and neighbor not in visited:
+    #                     visited.add(neighbor)
+    #                     queue.append(neighbor)
+            
+    #         # Assign rewards based on connectivity
+    #         if len(visited) == num_agents:
+    #             # Graph is connected
+    #             # print("graph is connected")
+    #             connectivity_reward[env] = self.connection_reward_positive
+    #             self.eva_connection_num[:, env] = 1
+    #         else:
+    #             # Graph is disconnected
+    #             # print("graph is not connected")
+    #             connectivity_reward[env] = self.connection_reward_negative
+        
+    #     # Optionally scale the connectivity rewards
+    #     # connectivity_reward *= self.connection_reward_coefficient
+        
+    #     return connectivity_reward  # [batch_size]
+    
+
+    def compute_connectivity_reward(self, agent) -> Tensor:
+        """
+        Computes a dense connectivity reward for a single specified agent.
+        Includes a line-of-sight check to ensure connections are not blocked.
+        """
+        self.CONNECTED_BONUS = 1.0
+        self.PER_EDGE_REWARD_SCALE = 0.5      # Small positive reward for each of an agent's connections
+        self.ISOLATION_PENALTY_SCALE = -5.0   # Larger penalty applied directly to an isolated follower
+        self.FULL_GRAPH_BONUS = 10.0   
+        # This reward is only for followers.
+        if agent is self.leader_agent:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        follower_agents = [a for a in self.world.agents if a is not self.leader_agent]
+        num_followers = len(follower_agents)
+        if num_followers == 0:
+            return torch.zeros(self.batch_dim, device=self.device)
+            
+        try:
+            agent_follower_index = follower_agents.index(agent)
+        except ValueError:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        num_agents = len(self.world.agents)
+        batch_size = self.batch_dim
+
+        # --- 1. Build Adjacency Matrix with Line-of-Sight Check ---
+        adjacency = torch.zeros(batch_size, num_agents, num_agents, device=self.device)
+        # bitmaps_np = self.bitmap.bitmap.cpu().numpy()
+        # bitmap_origin = [-12.8, -12.8]
+        # bitmap_scale = 0.1
+
+        for i, agent1 in enumerate(self.world.agents):
+            for j, agent2 in enumerate(self.world.agents):
+                if i >= j: continue
+                
+                pos_i, pos_j = agent1.state.pos, agent2.state.pos
+                rot_i, rot_j = agent1.state.rot.squeeze(-1), agent2.state.rot.squeeze(-1)
+                
+                rel_pos_ij = pos_j - pos_i
+                d_ij = torch.norm(rel_pos_ij, dim=1)
+                within_distance = (d_ij <= self.max_connection_distance)  & (d_ij >= 0.7)
+                
+                theta_ij = self._normalize_angle(torch.atan2(rel_pos_ij[:, 1], rel_pos_ij[:, 0]) - rot_i)
+                i_sees_j = within_distance & (theta_ij >= self.FOV_min) & (theta_ij <= self.FOV_max)
+                
+                theta_ji = self._normalize_angle(torch.atan2(-rel_pos_ij[:, 1], -rel_pos_ij[:, 0]) - rot_j)
+                j_sees_i = within_distance & (theta_ji >= self.FOV_min) & (theta_ji <= self.FOV_max)
+
+                connection = i_sees_j | j_sees_i
+                
+                # for env_idx in range(batch_size):
+                #     if connection[env_idx]:
+                #         if not self._is_line_clear(pos_i[env_idx], pos_j[env_idx], bitmaps_np[env_idx], bitmap_origin, bitmap_scale):
+                #             connection[env_idx] = False
+                
                 adjacency[:, i, j] = connection.float()
                 adjacency[:, j, i] = connection.float()
-                    
-        #         for dim in range(self.world.batch_dim):
-        #             if adjacency[dim, i, j] == 1.0:
-        #                 is_line_clear = self.is_line_clear(agent1.state.pos[dim, :], agent2.state.pos[dim, :], self.obstacle_manager_list[dim])
-        #                 if is_line_clear == False:
-        #                     adjacency[dim, i, j] == 0.0
-        #                     adjacency[dim, j, i] = 0.0
-        # # Initialize connectivity rewards: [batch_size]
-        connectivity_reward = torch.zeros(batch_size, device=self.device)
-        # print("adj:{}".format(adjacency))
-        # Check connectivity for each environment using BFS
-        for env in range(batch_size):
-            adj = adjacency[env].cpu().numpy()  # [num_agents, num_agents]
+
+        # --- 2. Calculate Per-Agent Reward Components ---
+        agent_total_reward = torch.zeros(batch_size, device=self.device)
+        
+        # Degree of each node is the sum of its connections
+        degree = torch.sum(adjacency, dim=2) # Shape: [batch_size, num_agents]
+        
+        # Get the degree for the specific agent we are calculating the reward for
+        # The agent's index in self.world.agents is agent_follower_index + 1
+        this_agent_degree = degree[:, agent_follower_index + 1]
+
+        is_connected = (this_agent_degree > 0)
+        agent_total_reward += torch.where(is_connected, self.CONNECTED_BONUS, self.ISOLATION_PENALTY_SCALE)
+        # A. Individual Connection Reward (based on this agent's degree)
+        # agent_total_reward += self.PER_EDGE_REWARD_SCALE * this_agent_degree
+
+        # B. Isolation Penalty (only for this agent)
+        # is_isolated = (this_agent_degree == 0)
+        # agent_total_reward += torch.where(is_isolated, self.ISOLATION_PENALTY_SCALE, 0.0)
+
+        # --- 3. Calculate Shared Full Connectivity Bonus ---
+        full_connectivity_bonus = torch.zeros(batch_size, device=self.device)
+        for env_idx in range(batch_size):
+            adj_env = adjacency[env_idx].cpu().numpy()
             visited = set()
-            queue = deque()
-            queue.append(0)  # Start BFS from the first agent
+            queue = deque([0])
             visited.add(0)
             
             while queue:
                 current = queue.popleft()
                 for neighbor in range(num_agents):
-                    if adj[current, neighbor] == 1 and neighbor not in visited:
+                    if adj_env[current, neighbor] == 1 and neighbor not in visited:
                         visited.add(neighbor)
                         queue.append(neighbor)
             
-            # Assign rewards based on connectivity
             if len(visited) == num_agents:
-                # Graph is connected
-                # print("graph is connected")
-                connectivity_reward[env] = self.connection_reward_positive
-                self.eva_connection_num[:, env] = 1
-            else:
-                # Graph is disconnected
-                # print("graph is not connected")
-                connectivity_reward[env] = self.connection_reward_negative
+                full_connectivity_bonus[env_idx] = self.FULL_GRAPH_BONUS
         
-        # Optionally scale the connectivity rewards
-        # connectivity_reward *= self.connection_reward_coefficient
+        # Add this agent's share of the team bonus
+        agent_total_reward += full_connectivity_bonus / num_followers
         
-        return connectivity_reward  # [batch_size]
-    
+        return agent_total_reward
+
+
     def reward(self, agent: Agent):
         current_agent_index = self.world.agents.index(agent)
         is_first = agent == self.world.agents[0] 
@@ -5785,22 +5863,20 @@ class Scenario(BaseScenario):
 
         #         # Check for collision and update the reward based on closest distance
         #         collision_mask = closest_dist < 0.2
-        #         if torch.any(collision_mask):  # Check if there are any collisions
+        #         if torch.any(collision_mask):  # Check if there are any collisions钟前
         #             if i > 0:
         #                 self.eva_collision_num[i-1 ,collision_mask] = 1
         #             a.agent_collision_rew[collision_mask] += -0.4 * (1 - closest_dist[collision_mask] / 0.2)
         #         # if torch.any(collision_free_mask):
         #             # a.formation_rew[collision_free_mask] = agent_formation_rew[collision_free_mask]
-            self.connection_rew = self.compute_connectivity_reward()
             # print("connection time:{}".format(time.time() - connection_time))
             # self.group_center_diff_rew = self.compute_group_center_reward()
-            self.group_center_diff_rew = self.compute_group_sector_reward()
         #leader robot do not contribute to the reward
 
         agent.collision_obstacle_rew = self.single_agent_collision_obstacle_rew(agent)
         if self.env_type == "bitmap":
             # pass
-            agent.pos_rew = self.single_agent_reward_graph_formation_maintained(agent)
+            agent.pos_rew = self.compute_hybrid_chamfer_reward(agent)
         if is_first:
             # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
             return agent.target_collision_rew
@@ -5808,9 +5884,9 @@ class Scenario(BaseScenario):
         if self.env_type == "clutter":
             agent.connection_rew = self.compute_agent_connectivity_reward(agent)
         else:
-            agent.connection_rew = self.connection_rew.clone()
+            agent.connection_rew = self.compute_connectivity_reward(agent)
 
-        agent.group_center_rew = self.group_center_diff_rew.clone()
+        agent.group_center_rew = self.compute_adaptive_sector_reward(agent)
         # agent.target_collision_rew = self.agent_target_collision_reward(agent)
         # for i, a in enumerate(self.world.agents):
         #     for j, b in enumerate(self.world.agents):
@@ -5854,8 +5930,11 @@ class Scenario(BaseScenario):
         agent.connection_rew = 25*agent.connection_rew
         agent.action_diff_rew = 50*agent.action_diff_rew
         agent.angle_diff_with_leader_rew = 0.8*agent.angle_diff_with_leader_rew
-        agent.collision_obstacle_rew = 15* agent.collision_obstacle_rew
-        agent.pos_rew = 5* agent.pos_rew
+
+        agent.collision_obstacle_rew = self.collision_avoidance_reward_scale* agent.collision_obstacle_rew
+        print("agent collision rewar dscale:{}".format(self.collision_avoidance_reward_scale))
+        # input("1")
+        agent.pos_rew = 20* agent.pos_rew
         # agent.target_collision_rew = 10*agent.target_collision_rew
         # print("single reward timme:{}, index:{}".format(time.time() - reward_time,current_agent_index))
         # return agent.angle_diff_with_leader_rew + agent.agent_collision_rew + agent.connection_rew + agent.action_diff_rew + agent.target_collision_rew 
@@ -5873,8 +5952,9 @@ class Scenario(BaseScenario):
             #     rewards_setup2,       # Value if condition is True
             #     rewards_setup1        # Value if condition is False
             # ) 
-            # return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew + agent.pos_rew
-            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew 
+
+            # return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  
+            return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew  + agent.collision_obstacle_rew #+ agent.pos_rew
             
             # return  agent.connection_rew  + agent.group_center_rew + agent.agent_collision_rew + agent.action_diff_rew + agent.collision_obstacle_rew
 
@@ -5979,46 +6059,253 @@ class Scenario(BaseScenario):
         # Verbose printing, consider reducing for performance
         # print(f"Debug: formation_goals_specs_list length: {len(formation_goals_specs_list)}")
         # if formation_goals_specs_list:
+        #     print(f"Debug: formation_goals_specs_lis current_agent_rotations_dict = {} # Renamed for clarity: current agent states
+
+        for a_index, ag in enumerate(self.world.agents):
+            current_agent_positions_dict[a_index] = ag.state.pos
+            current_agent_rotations_dict[a_index] = ag.state.rot
+
+        batch_size = agent.state.pos.shape[0]
+        num_agents = len(self.world.agents)
+
+        # Prepare list of all goal specifications (which include both position and rotation)
+        # This list will contain tensors of shape [batch_size, num_features_per_goal]
+        formation_goals_specs_list = []
+
+        if not hasattr(self, 'formation_nominal_goals') or \
+        len(self.formation_nominal_goals) != num_agents:
+            raise ValueError("self.formation_nominal_goals is not properly defined or has incorrect length.")
+        if self.formation_nominal_goals and self.formation_nominal_goals[0].shape[1] < 3:
+            raise ValueError("self.formation_nominal_goals[i] must have at least 3 features (x, y, rotation).")
+
+
+        for i in range(num_agents):
+            formation_goals_specs_list.append(self.formation_nominal_goals[i])
+
+        # Verbose printing, consider reducing for performance
+        # print(f"Debug: formation_goals_specs_list length: {len(formation_goals_specs_list)}")
+        # if formation_goals_specs_list:
         #     print(f"Debug: formation_goals_specs_list[0] shape: {formation_goals_specs_list[0].shape}")
 
         for batch_idx in range(batch_size):
-           
+            if self.current_env_type[batch_idx] == 0:
 
-            # Get the current agent's actual position for this batch item
-            agent_actual_position = current_agent_positions_dict[current_agent_index][batch_idx, :2]
-            # Get the position of the goal assigned to this agent (for positional reward)
-            assigned_target_position = self.formation_nominal_goals[current_agent_index][batch_idx, :2]
+                # Get the current agent's actual position for this batch item
+                agent_actual_position = current_agent_positions_dict[current_agent_index][batch_idx, :2]
+                # Get the position of the goal assigned to this agent (for positional reward)
+                assigned_target_position = self.formation_nominal_goals[current_agent_index][batch_idx, :2]
 
-            # --- Positional Reward ---
-            distance_to_positional_goal = torch.norm(agent_actual_position - assigned_target_position)
-            position_reward_component = -distance_to_positional_goal
+                # --- Positional Reward ---
+                distance_to_positional_goal = torch.norm(agent_actual_position - assigned_target_position)
+                position_reward_component = -distance_to_positional_goal
 
-            # --- Rotational Reward/Penalty ---
-            # Get the current agent's actual rotation for this batch item
-            agent_actual_rotation = current_agent_rotations_dict[current_agent_index][batch_idx, 0] # Shape e.g. [1]
-            
-            # Get the target rotation of the goal assigned to this agent
-            assigned_target_rotation = self.formation_nominal_goals[current_agent_index][batch_idx, 2] # Shape e.g. [1]
+                # --- Rotational Reward/Penalty ---
+                # Get the current agent's actual rotation for this batch item
+                agent_actual_rotation = current_agent_rotations_dict[current_agent_index][batch_idx, 0] # Shape e.g. [1]
+                
+                # Get the target rotation of the goal assigned to this agent
+                assigned_target_rotation = self.formation_nominal_goals[current_agent_index][batch_idx, 2] # Shape e.g. [1]
 
-            rot_diff = agent_actual_rotation - assigned_target_rotation
-            normalized_rot_diff = torch.atan2(torch.sin(rot_diff), torch.cos(rot_diff))
-            rotation_cost_component = normalized_rot_diff.abs()
+                rot_diff = agent_actual_rotation - assigned_target_rotation
+                normalized_rot_diff = torch.atan2(torch.sin(rot_diff), torch.cos(rot_diff))
+                rotation_cost_component = normalized_rot_diff.abs()
 
-            # --- Combine Rewards ---
-            final_reward = position_reward_component - rotation_weight * rotation_cost_component
-            if final_reward.numel() > 1:
-                print(f"Warning: final_reward is not scalar: {final_reward}. Taking mean.")
-                final_reward = final_reward.mean()
+                # --- Combine Rewards ---
+                final_reward = position_reward_component - rotation_weight * rotation_cost_component
+                if final_reward.numel() > 1:
+                    print(f"Warning: final_reward is not scalar: {final_reward}. Taking mean.")
+                    final_reward = final_reward.mean()
 
-            # print(f"Agent {current_agent_index}, Batch {batch_idx}: PosDist {distance_to_positional_goal.item():.3f}, "
-            #       f"RotDiff_abs {rotation_cost_component.item():.3f}, FinalRew {final_reward.item():.3f}")
-            
-            agent.pos_rew[batch_idx] = final_reward
+                # print(f"Agent {current_agent_index}, Batch {batch_idx}: PosDist {distance_to_positional_goal.item():.3f}, "
+                #       f"RotDiff_abs {rotation_cost_component.item():.3f}, FinalRew {final_reward.item():.3f}")
+                
+                agent.pos_rew[batch_idx] = final_reward
 
         return agent.pos_rew
 
+  
+
+    def _compute_pairwise_distances(self, positions: Tensor) -> Tensor:
+        """
+        Computes the matrix of Euclidean distances between all pairs of points.
+        """
+        pos_expanded_1 = positions.unsqueeze(-2)
+        pos_expanded_2 = positions.unsqueeze(-3)
+        diff_sq = (pos_expanded_1 - pos_expanded_2).pow(2).sum(dim=-1)
+        return torch.sqrt(diff_sq + 1e-6)
+
+    def _get_shape_signature(self, distance_matrix: Tensor) -> Tensor:
+        """
+        Extracts and sorts the unique pairwise distances to create a shape signature.
+        """
+        # For a single matrix [N, N]
+        if distance_matrix.dim() == 2:
+            # Get the indices of the upper triangle, excluding the diagonal (k=1)
+            indices = torch.triu_indices(row=distance_matrix.shape[0], col=distance_matrix.shape[1], offset=1)
+            # Extract the unique distances and sort them
+            unique_distances = distance_matrix[indices[0], indices[1]]
+            return torch.sort(unique_distances)[0]
+        # For a batch of matrices [B, N, N]
+        elif distance_matrix.dim() == 3:
+            batch_size, n, _ = distance_matrix.shape
+            indices = torch.triu_indices(row=n, col=n, offset=1)
+            # Extract distances for the whole batch, then sort each batch item's distances
+            unique_distances_batch = distance_matrix[:, indices[0], indices[1]]
+            return torch.sort(unique_distances_batch, dim=1)[0]
+        else:
+            raise ValueError("Unsupported dimension for distance_matrix")
 
 
+    def compute_hybrid_chamfer_reward(self, agent: object) -> Tensor:
+        """
+        Computes a per-agent reward that balances an individual objective with a
+        shared team objective, both derived from the Chamfer Distance framework.
+        This prevents agents from clumping on the same target.
+        """
+        if agent is self.leader_agent:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        follower_agents = [a for a in self.world.agents if a is not self.leader_agent]
+        if not follower_agents:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        # --- Configuration ---
+        # Alpha controls the mix between the shared (team) and individual (selfish) reward.
+        # alpha=0.0 -> Purely individual reward (risk of clumping)
+        # alpha=1.0 -> Purely shared reward (credit assignment problem)
+        # A value like 0.5 is a good starting point.
+        self.REWARD_MIX_ALPHA = 0.5
+        self.REWARD_SCALE = 5.0
+        self.ORIENTATIONAL_ALIGNMENT_ERROR_SCALE = -5.0
+
+        # --- Target Formation Definition ---
+        nominal_formation_points = torch.tensor([
+            [-1.2, 0.6], [-1.2, -0.6], [-2.4, 1.2], [-2.4, -1.2]
+        ], device=self.device).unsqueeze(0)
+
+        # --- 1. Get ALL follower positions in the leader's local frame ---
+        leader_pos = self.leader_agent.state.pos
+        leader_orient = self.leader_agent.state.rot
+
+        all_follower_pos_global = torch.stack([a.state.pos for a in follower_agents], dim=1)
+        
+        translated_pos = all_follower_pos_global - leader_pos.unsqueeze(1)
+        neg_leader_orient = -leader_orient
+        cos_neg_lo = torch.cos(neg_leader_orient)
+        sin_neg_lo = torch.sin(neg_leader_orient)
+        x_local = translated_pos[..., 0] * cos_neg_lo - translated_pos[..., 1] * sin_neg_lo
+        y_local = translated_pos[..., 0] * sin_neg_lo + translated_pos[..., 1] * cos_neg_lo
+        all_follower_pos_local = torch.stack([x_local, y_local], dim=2)
+
+        # --- 2. Calculate the Shared (Team) Reward Component ---
+        # This is the full Chamfer Distance calculation for the entire group.
+        dist_matrix = torch.cdist(all_follower_pos_local, nominal_formation_points)
+        
+        term_1 = torch.min(dist_matrix, dim=2).values.mean(dim=1)
+        term_2 = torch.min(dist_matrix, dim=1).values.mean(dim=1)
+        global_chamfer_distance = term_1 + term_2
+        
+        # Shared reward is high when the overall shape is good
+        shared_reward = torch.exp(-0.8 * global_chamfer_distance)
+
+        # --- 3. Calculate the Individual (Selfish) Reward Component ---
+        # Find the index of our specific agent to locate its data
+        agent_idx = follower_agents.index(agent)
+        agent_pos_local = all_follower_pos_local[:, agent_idx:agent_idx+1, :] # Shape: (batch, 1, 2)
+
+        # Find the distance from THIS agent to its closest target
+        dist_to_all_targets = torch.cdist(agent_pos_local, nominal_formation_points)
+        min_dist_to_target, _ = torch.min(dist_to_all_targets, dim=2)
+        
+        # Individual reward is high when the agent is close to ANY target
+        individual_reward = torch.exp(-1.5 * min_dist_to_target.squeeze(-1))
+        
+        # --- 4. Combine Rewards ---
+        # The final reward is a weighted average of the team and individual rewards.
+        final_reward = self.REWARD_SCALE * (
+            self.REWARD_MIX_ALPHA * shared_reward +
+            (1 - self.REWARD_MIX_ALPHA) * individual_reward
+        )
+
+        # You could also add an individual orientation reward here if desired
+        # ...
+
+        return final_reward
+
+    def compute_hybrid_chamfer_reward(self, agent: object) -> Tensor:
+        """
+        Computes a per-agent reward that balances an individual objective with a
+        shared team objective, both derived from the Chamfer Distance framework.
+        This prevents agents from clumping on the same target.
+        """
+        if agent is self.leader_agent:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        follower_agents = [a for a in self.world.agents if a is not self.leader_agent]
+        if not follower_agents:
+            return torch.zeros(self.batch_dim, device=self.device)
+
+        # --- Configuration ---
+        # Alpha controls the mix between the shared (team) and individual (selfish) reward.
+        self.REWARD_MIX_ALPHA = 0.5
+        self.POSITION_REWARD_SCALE = 5.0
+        # New scale for the orientation reward component
+        self.ORIENT_REWARD_SCALE = 2.0
+
+        # --- Target Formation Definition ---
+        nominal_formation_points = torch.tensor([
+            [-1.2, 0.6], [-1.2, -0.6], [-2.4, 1.2], [-2.4, -1.2]
+        ], device=self.device).unsqueeze(0)
+
+        # --- 1. Get ALL follower positions in the leader's local frame ---
+        leader_pos = self.leader_agent.state.pos
+        leader_orient = self.leader_agent.state.rot
+
+        all_follower_pos_global = torch.stack([a.state.pos for a in follower_agents], dim=1)
+        
+        translated_pos = all_follower_pos_global - leader_pos.unsqueeze(1)
+        neg_leader_orient = -leader_orient
+        cos_neg_lo = torch.cos(neg_leader_orient)
+        sin_neg_lo = torch.sin(neg_leader_orient)
+        x_local = translated_pos[..., 0] * cos_neg_lo - translated_pos[..., 1] * sin_neg_lo
+        y_local = translated_pos[..., 0] * sin_neg_lo + translated_pos[..., 1] * cos_neg_lo
+        all_follower_pos_local = torch.stack([x_local, y_local], dim=2)
+
+        # --- 2. Calculate the Shared (Team) Reward Component ---
+        dist_matrix = torch.cdist(all_follower_pos_local, nominal_formation_points)
+        term_1 = torch.min(dist_matrix, dim=2).values.mean(dim=1)
+        term_2 = torch.min(dist_matrix, dim=1).values.mean(dim=1)
+        global_chamfer_distance = term_1 + term_2
+        shared_reward = torch.exp(-0.8 * global_chamfer_distance)
+
+        # --- 3. Calculate the Individual (Selfish) Reward Component ---
+        agent_idx = follower_agents.index(agent)
+        agent_pos_local = all_follower_pos_local[:, agent_idx:agent_idx+1, :]
+        dist_to_all_targets = torch.cdist(agent_pos_local, nominal_formation_points)
+        min_dist_to_target, _ = torch.min(dist_to_all_targets, dim=2)
+        individual_reward = torch.exp(-1.5 * min_dist_to_target.squeeze(-1))
+        
+        # --- 4. Combine Positional Rewards ---
+        positional_reward = self.POSITION_REWARD_SCALE * (
+            self.REWARD_MIX_ALPHA * shared_reward +
+            (1 - self.REWARD_MIX_ALPHA) * individual_reward
+        )
+
+        # --- 5. Calculate Individual Orientation Reward ---
+        agent_orient = agent.state.rot.squeeze(-1)
+        leader_orient_global = leader_orient.squeeze(-1)
+        
+        # Calculate the difference in orientation
+        angle_diff = agent_orient - leader_orient_global
+        
+        # Use cosine of the difference for a smooth reward signal.
+        # cos(0) = 1 (perfect alignment), cos(pi) = -1 (opposite direction).
+        orient_reward = self.ORIENT_REWARD_SCALE * torch.cos(angle_diff)
+
+        # --- 6. Combine All Rewards ---
+        final_reward = positional_reward + orient_reward
+
+        return final_reward
     #when robot and goal is one-on-one 
     def agent_reward(self, agent: Agent):
         current_agent_index = self.world.agents.index(agent)
@@ -6130,8 +6417,8 @@ class Scenario(BaseScenario):
         left_opening_y = torch.clamp(left_opening_y, 0, max_half_opening_width)
 
         print("left_opening_y:{}".format(left_opening_y))
-        # left_opening_y = left_opening_y - 0.7
-        # print("left_opening_y after minus0.7:{}".format(left_opening_y))
+        left_opening_y = left_opening_y - 0.7
+        print("left_opening_y after minus0.7:{}".format(left_opening_y))
         left_opening_y = torch.where(
              (left_opening_y < 0), # If no valid left obstacle or y became negative
             torch.full_like(left_opening_y, 0.01),
@@ -6158,7 +6445,7 @@ class Scenario(BaseScenario):
             right_opening_y
         )
         right_opening_y = torch.clamp(right_opening_y, -max_half_opening_width, 0)
-        # right_opening_y = right_opening_y + 0.7
+        right_opening_y = right_opening_y + 0.7
         right_opening_y = torch.where(
              (right_opening_y > 0), # If no valid left obstacle or y became negative
             torch.full_like(right_opening_y, -0.01),
@@ -6168,6 +6455,109 @@ class Scenario(BaseScenario):
         final_right_opening_abs_y = torch.clamp(torch.abs(right_opening_y), 0, max_half_opening_width)
 
         return final_left_opening_abs_y, final_right_opening_abs_y
+
+    def _normalize_angles_for_opening_calculation(angles_0_to_2pi: torch.Tensor) -> torch.Tensor:
+        """
+        Normalizes angles from [0, 2*pi) to approximately [-pi, pi).
+        """
+        angles_mod = angles_0_to_2pi % (2 * torch.pi)
+        normalized_angles = torch.where(angles_mod >= torch.pi, angles_mod - 2 * torch.pi, angles_mod)
+        return normalized_angles
+
+    def compute_group_perceived_opening(
+        self,
+        all_agents_global_pos: List[Tensor],  # List of [batch_dim, 2] tensors for each agent
+        all_agents_global_rot: List[Tensor],  # List of [batch_dim, 1] tensors for each agent
+        all_agents_lidar_readings: List[Tensor], # List of [batch_dim, n_rays] tensors
+        all_agents_lidar_angles: List[Tensor], # List of [batch_dim, n_rays] tensors (local to each agent)
+        leader_pos: Tensor,                   # Leader's global position [batch_dim, 2]
+        leader_orient: Tensor,                # Leader's global orientation [batch_dim, 1]
+        max_half_opening_width: float,
+        obstacle_distance_threshold: float,
+        forward_check_distance: float = 2.0 # How far ahead of the front-most follower to check for openings
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes the perceived opening by combining LiDAR scans from all agents and
+        analyzing the space relevant to the entire formation's volume.
+
+        Returns:
+            A tuple (left_opening, right_opening) for the entire group.
+        """
+        batch_dim = leader_pos.shape[0]
+        device = leader_pos.device
+
+        if batch_dim == 0 or len(all_agents_global_pos) <= 1:
+            return torch.full((batch_dim,), max_half_opening_width, device=device), \
+                   torch.full((batch_dim,), max_half_opening_width, device=device)
+
+        # --- 1. Transform all LiDAR points from all agents into the leader's local frame ---
+        all_points_in_leader_frame_list = []
+
+        for i in range(len(all_agents_global_pos)):
+            agent_pos = all_agents_global_pos[i]
+            agent_rot = all_agents_global_rot[i]
+            lidar_readings = all_agents_lidar_readings[i]
+            lidar_angles_local = all_agents_lidar_angles[i]
+            
+            valid_readings_mask = lidar_readings < obstacle_distance_threshold
+            
+            # A. Convert LiDAR polar coordinates to the agent's local Cartesian coordinates
+            x_local = lidar_readings * torch.cos(lidar_angles_local)
+            y_local = lidar_readings * torch.sin(lidar_angles_local)
+            
+            # B. Transform these local points to global coordinates using component-wise rotation
+            cos_agent_rot = torch.cos(agent_rot) # Shape: [batch, 1]
+            sin_agent_rot = torch.sin(agent_rot) # Shape: [batch, 1]
+            
+            x_global = agent_pos[:, 0].unsqueeze(1) + x_local * cos_agent_rot - y_local * sin_agent_rot
+            y_global = agent_pos[:, 1].unsqueeze(1) + x_local * sin_agent_rot + y_local * cos_agent_rot
+            points_in_global_frame = torch.stack([x_global, y_global], dim=2) # Shape: [batch, n_rays, 2]
+            
+            # C. Transform these global points into the LEADER's local frame
+            translated_points = points_in_global_frame - leader_pos.unsqueeze(1)
+            
+            neg_leader_orient = -leader_orient
+            cos_neg_lo = torch.cos(neg_leader_orient) # Shape: [batch, 1]
+            sin_neg_lo = torch.sin(neg_leader_orient) # Shape: [batch, 1]
+            
+            x_trans = translated_points[..., 0]
+            y_trans = translated_points[..., 1]
+
+            x_leader_frame = x_trans * cos_neg_lo - y_trans * sin_neg_lo
+            y_leader_frame = x_trans * sin_neg_lo + y_trans * cos_neg_lo
+            
+            points_in_leader_frame = torch.stack([x_leader_frame, y_leader_frame], dim=2)
+
+            # Apply the validity mask, setting invalid points to infinity
+            all_points_in_leader_frame_list.append(points_in_leader_frame.where(valid_readings_mask.unsqueeze(-1), torch.tensor(float('inf'), device=device)))
+
+        # --- 2. Analyze the unified point cloud ---
+        unified_point_cloud = torch.cat(all_points_in_leader_frame_list, dim=1)
+        
+        # --- 3. Filter the unified point cloud to the relevant area using FIXED bounds ---
+        relevant_points_mask = (unified_point_cloud[..., 0] >= -3.0) & \
+                               (unified_point_cloud[..., 0] <= 1.0) & \
+                               (torch.isfinite(unified_point_cloud[..., 0])) # Check for infinity
+
+        # --- 4. Find the narrowest opening within this relevant area ---
+        y_coords_of_hits = unified_point_cloud[..., 1]
+
+        # Left side: Find the minimum positive y-coordinate among relevant obstacles
+        left_side_mask = relevant_points_mask & (y_coords_of_hits > 0)
+        left_obstacle_y_values = torch.where(left_side_mask, y_coords_of_hits, torch.full_like(y_coords_of_hits, float('inf')))
+        left_opening, _ = torch.min(left_obstacle_y_values, dim=1)
+        left_opening = torch.where(torch.isinf(left_opening), torch.full_like(left_opening, max_half_opening_width), left_opening)
+        final_left_opening = torch.clamp(left_opening, 0, max_half_opening_width)
+
+        # Right side: Find the maximum negative y-coordinate among relevant obstacles
+        right_side_mask = relevant_points_mask & (y_coords_of_hits < 0)
+        right_obstacle_y_values = torch.where(right_side_mask, y_coords_of_hits, torch.full_like(y_coords_of_hits, float('-inf')))
+        right_opening, _ = torch.max(right_obstacle_y_values, dim=1)
+        right_opening = torch.where(torch.isinf(right_opening), torch.full_like(right_opening, -max_half_opening_width), right_opening)
+        final_right_opening = torch.clamp(torch.abs(right_opening), 0, max_half_opening_width)
+
+        return final_left_opening, final_right_opening
+
 
     def update_and_get_smoothed_opening(
         self,
@@ -6183,25 +6573,44 @@ class Scenario(BaseScenario):
         """
         # Reset the smoothed values for environments that just finished an episode
         # self.reset(dones=dones)
+        all_pos = [agent.state.pos for agent in self.world.agents]
+        all_rot = [agent.state.rot for agent in self.world.agents]
+        all_lidar_readings = [agent.sensors[0].measure() for agent in self.world.agents]
+        all_lidar_angles = [agent.sensors[0]._angles for agent in self.world.agents]
+
+        leader_pos = self.leader_agent.state.pos
+        leader_orient = self.leader_agent.state.rot
+
+        # 2. Call the new function to get a single, group-wide opening perception
+        raw_left, raw_right = self.compute_group_perceived_opening(
+            all_pos,
+            all_rot,
+            all_lidar_readings,
+            all_lidar_angles,
+            leader_pos,
+            leader_orient,
+            max_half_opening_width=2.0,
+            obstacle_distance_threshold=2.3
+        )
+
 
         # 1. Get the current raw measurement
-        raw_left, raw_right = self.compute_lidar_opening_raw(
-            raw_lidar_readings,
-            ray_angles,
-            max_half_opening_width,
-            obstacle_distance_threshold,
-            max_abs_angle_for_opening_calc
-        )
+        # raw_left, raw_right = self.compute_lidar_opening_raw(
+        #     raw_lidar_readings,
+        #     ray_angles,
+        #     max_half_opening_width,
+        #     obstacle_distance_threshold,
+        #     max_abs_angle_for_opening_calc
+        # )
 
         # 2. Apply EMA filter
         # smoothed_value = alpha * new_value + (1 - alpha) * old_smoothed_value
-        alpha = self.LIDAR_OPENING_SMOOTHING_ALPHA
+        # alpha = self.LIDAR_OPENING_SMOOTHING_ALPHA
         
-        self.smoothed_left_opening = alpha * raw_left + (1 - alpha) * self.smoothed_left_opening
-        self.smoothed_right_opening = alpha * raw_right + (1 - alpha) * self.smoothed_right_opening
-
+        # self.smoothed_left_opening = alpha * raw_left + (1 - alpha) * self.smoothed_left_opening
+        # self.smoothed_right_opening = alpha * raw_right + (1 - alpha) * self.smoothed_right_opening
         # Return the newly updated smoothed values
-        return self.smoothed_left_opening, self.smoothed_right_opening
+        return raw_left, raw_right
 
     def observation(self, agent: Agent):
         # get_obs_time = time.time()
@@ -6285,7 +6694,7 @@ class Scenario(BaseScenario):
                     cos_theta * rel_pos[0] + sin_theta * rel_pos[1],
                     -sin_theta * rel_pos[0] + cos_theta * rel_pos[1]
                 ])
-                    
+                print("agent {}, rotated_pos:{}".format(current_agent_index, rotated_pos))
                 relative_poses.append(torch.cat([rotated_pos, rel_theta_normalized.unsqueeze(0)]))
         # print("relative_pos shape:{}".format(torch.stack(relative_poses).shape))
         opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=0)
@@ -6367,8 +6776,7 @@ class Scenario(BaseScenario):
         # optimized_target_pos = torch.bmm(rotation_matrices, translated_agent_pos.unsqueeze(-1)).squeeze(-1)  # Shape: [batch_dim, 2]
         # optimized_target_pose = torch.cat([optimized_target_pos, translated_agent_rot], dim=1)
         # print("optimized_target_pose:{}".format(optimized_target_pose.shape))
-        env_type = self.get_forward_env_type()
-        
+        self.current_env_type = self.get_forward_env_type()
         if current_agent_index == 0:
             opening_tensor = torch.stack([self.smoothed_left_opening, self.smoothed_right_opening], dim=1)
             opening_list = list(opening_tensor)
@@ -6394,8 +6802,7 @@ class Scenario(BaseScenario):
                 "group_center_rew": agent.group_center_rew,
                 "collision_obstacle_rew": agent.collision_obstacle_rew,
                 "agent_pos_rew": agent.pos_rew,
-                "env_type": env_type,
-
+                "env_type": self.current_env_type,
             }
         else:
             return {
@@ -6414,9 +6821,49 @@ class Scenario(BaseScenario):
                 "agent_vel": agent.state.vel,
                 "agent_ang_vel": agent.state.ang_vel,
                 "agent_pos_rew": agent.pos_rew,
+                "env_type": self.current_env_type,
 
             }
     
+
+    def get_forward_env_type(self):
+        instantaneous_env_type = torch.ones(self.batch_dim, device=self.device, dtype=torch.long)
+
+        is_wide_open = (self.smoothed_left_opening > 1.85) & (self.smoothed_right_opening > 1.85)
+        is_narrow = (self.smoothed_left_opening < 0.3) & (self.smoothed_right_opening < 0.3)
+
+        instantaneous_env_type[is_wide_open] = 0
+        instantaneous_env_type[is_narrow] = 2
+        
+        # --- Step 2: Check history to identify "Deep Tunnel" state ---
+        # Check if the last `TUNNEL_COMMIT_STEPS` in the history were all type 2.
+        # This creates a boolean mask of shape [batch_dim].
+        is_deep_in_tunnel = (self.env_type_history == 2).all(dim=1)
+        is_short_in_tunnel = (self.env_type_history_enter_tunnel == 2).all(dim=1)
+        # --- Step 3: Generate the final output type ---
+        # Start with the instantaneous type.
+        final_env_type = instantaneous_env_type.clone()
+        
+        # Where the "deep in tunnel" condition is met, override the type to 3.
+        # This handles the transition from 2 -> 3.
+        final_env_type[is_short_in_tunnel] = 2
+        final_env_type[is_deep_in_tunnel] = 3
+        
+        # --- Step 4: Update the history buffer for the next time step ---
+        # Shift the history one step to the left (discarding the oldest entry).
+        self.env_type_history = torch.roll(self.env_type_history, shifts=-1, dims=1)
+        self.env_type_history_enter_tunnel = torch.roll(self.env_type_history, shifts=-1, dims=1)
+
+        
+        # Add the new *instantaneous* type to the end of the history.
+        # We use the instantaneous type so the history reflects the raw perception,
+        # allowing the "is_deep_in_tunnel" condition to trigger correctly in the future.
+        self.env_type_history[:, -1] = instantaneous_env_type
+        self.env_type_history_enter_tunnel[:, -1] = instantaneous_env_type
+
+        return final_env_type
+
+
 
 
     def extra_render(self, env_index: int = 0) -> "List[Geom]":
@@ -6503,8 +6950,8 @@ class Scenario(BaseScenario):
             # If there's an error in rendering the path, log it but don't crash
             print(f"Error rendering leader path: {e}")
 
-        left_opening_text = rendering.TextLine("left:{}".format(self.smoothed_left_opening.item()), x = 0.5, y=0.2)
-        right_opening_text = rendering.TextLine("right:{}".format(self.smoothed_right_opening.item()), x = 275.7, y=0.2)
+        left_opening_text = rendering.TextLine("left:{}".format(self.smoothed_left_opening[env_index].item()), x = 0.5, y=0.2)
+        right_opening_text = rendering.TextLine("right:{}".format(self.smoothed_right_opening[env_index].item()), x = 275.7, y=0.2)
         geoms.append(left_opening_text)
         geoms.append(right_opening_text)
 

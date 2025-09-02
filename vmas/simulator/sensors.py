@@ -167,9 +167,12 @@ class Lidar(Sensor):
                 xform.set_translation(*self.agent.state.pos[env_index])
                 xform.set_rotation(angle)
                 ray.add_attr(xform)
+                # if dist < 2.45:
+                ray_circ = rendering.make_circle(0.1)
+                # else:
+                    # ray_circ = rendering.make_circle(0.02)
 
-                ray_circ = rendering.make_circle(0.01)
-                ray_circ.set_color(*self._render_color.value)
+                ray_circ.set_color(*vmas.simulator.utils.Color.RED.value)
                 xform = rendering.Transform()
                 rot = torch.stack([torch.cos(angle), torch.sin(angle)], dim=-1)
                 pos_circ = (
